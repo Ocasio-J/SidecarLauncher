@@ -56,7 +56,7 @@ guard let sdm = NSClassFromString("SidecarDisplayManager") as? NSObject.Type els
 }
 
 guard let manager = sdm.perform(Selector(("sharedManager")))?.takeUnretainedValue() else {
-    fatalError("Failed to instance of SidecarDisplayManger")
+    fatalError("Failed to get instance of SidecarDisplayManger")
 }
 
 guard let devices = manager.perform(Selector(("devices")))?.takeUnretainedValue() as? [NSObject] else {
@@ -65,7 +65,7 @@ guard let devices = manager.perform(Selector(("devices")))?.takeUnretainedValue(
 
 if (devices.isEmpty) {
     print("No sidecar capable devices detected")
-    exit(0)
+    exit(2)
 }
 
 if (cmd == .Connect) {
@@ -74,31 +74,35 @@ if (cmd == .Connect) {
         return name.lowercased() == targetDeviceName
     })
     
-    if let targetDevice = targetDevice {
-        let dispatchGroup = DispatchGroup()
-        let closure: @convention(block) (_ e: NSError?) -> Void = { e in
-            defer {
-                dispatchGroup.leave()
-            }
-            
-            if let e = e {
-                print(e)
-            } else {
-                print("connected")
-            }
-        }
-        dispatchGroup.enter()
-        _ = manager.perform(Selector(("connectToDevice:completion:")), with: targetDevice, with: closure)
-        dispatchGroup.wait()
-    } else {
+    guard let targetDevice = targetDevice else {
         print("""
               \(targetDeviceName) is not in the list of available devices.
               Verify device name. For example "Joe's iPad" is different from "Joe‘s iPad" (notice the apostrophe)
               For accuracy, list the available devices and copy paste the device name.
               """)
+        exit(3)
     }
+    
+    let dispatchGroup = DispatchGroup()
+    let closure: @convention(block) (_ e: NSError?) -> Void = { e in
+        defer {
+            dispatchGroup.leave()
+        }
+        
+        if let e = e {
+            print(e)
+            exit(4)
+        } else {
+            print("connected")
+        }
+    }
+    dispatchGroup.enter()
+    _ = manager.perform(Selector(("connectToDevice:completion:")), with: targetDevice, with: closure)
+    dispatchGroup.wait()
     
 } else {
     let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
-    print(deviceNames)
+    for deviceName in deviceNames {
+        print(deviceName)
+    }
 }
