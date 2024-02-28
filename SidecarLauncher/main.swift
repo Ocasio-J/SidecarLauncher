@@ -8,8 +8,9 @@
 import Foundation
 
 enum Command : String {
-    case Devices = "devices"
-    case Connect = "connect"
+    case Devices    = "devices"
+    case Connect    = "connect"
+    case Disconnect = "disconnect"
 }
 
 func printHelp() {
@@ -36,7 +37,7 @@ guard let cmd = Command(rawValue: CommandLine.arguments[1].lowercased()) else {
 }
 
 let targetDeviceName: String
-if (cmd == .Connect) {
+if (cmd == .Connect || cmd == .Disconnect) {
     if (CommandLine.arguments.count == 2) {
         print("Device name not specified")
         printHelp()
@@ -68,7 +69,7 @@ if (devices.isEmpty) {
     exit(2)
 }
 
-if (cmd == .Connect) {
+if (cmd == .Connect || cmd == .Disconnect) {
     let targetDevice = devices.first(where: {
         let name = $0.perform(Selector(("name")))?.takeUnretainedValue() as! String
         return name.lowercased() == targetDeviceName
@@ -93,11 +94,12 @@ if (cmd == .Connect) {
             print(e)
             exit(4)
         } else {
-            print("connected")
+            print(cmd == .Connect ? "connected" : "disconnected")
         }
     }
     dispatchGroup.enter()
-    _ = manager.perform(Selector(("connectToDevice:completion:")), with: targetDevice, with: closure)
+    let method = (cmd == .Connect ? "connectToDevice:completion:" : "disconnectFromDevice:completion:")
+    _ = manager.perform(Selector((method)), with: targetDevice, with: closure)
     dispatchGroup.wait()
     
 } else {
