@@ -19,7 +19,15 @@ func printHelp() {
             devices                  List names of reachable sidecar capable devices.
                                      Example: SidecarLauncher devices
             connect <device_name>    Connect to device with the specified name. Use quotes.
-                                     Example: SidecarLauncher connect "Joe‘s iPad"
+                                     Example: ./SidecarLauncher connect "Joe‘s iPad"
+            disconnect <device_name> Disconnect from device with the specified name. Use quotes.
+                                     Example: ./SidecarLauncher disconnect "Joe‘s iPad"
+        
+        Exit Codes:
+            0                        Command completed successfully
+            1                        Invalid input
+            2                        No reachable Sidecar devices detected
+            4                        SidecarCore private error encountered
         """
     print(help)
 }
