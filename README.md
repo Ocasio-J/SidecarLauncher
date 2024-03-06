@@ -1,6 +1,8 @@
 # SidecarLauncher
 A commandline tool to connect to a Sidecar capable device. No AppleScript, yay 🥳
 
+Download the binary from [https://github.com/Ocasio-J/SidecarLauncher/releases](https://github.com/Ocasio-J/SidecarLauncher/releases).
+
 List reachable Sidecar capable devices:
 
 `./SidecarLauncher devices`
