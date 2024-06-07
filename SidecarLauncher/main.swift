@@ -92,6 +92,16 @@ if (cmd == .Connect || cmd == .Disconnect) {
         exit(3)
     }
     
+//    guard let deviceConfig = manager.perform(Selector(("configForDevice:")), with: targetDevice)?.takeUnretainedValue() else {
+//        print("cry")
+//        exit(99)
+//    }
+    let deviceConfig = manager.perform(Selector(("configForDevice:")), with: targetDevice)?.takeUnretainedValue() as! NSObject
+//    let _ = deviceConfig.perform(Selector(("setShowSideBar:")), with: 1)
+//    let _ = deviceConfig.perform(Selector(("setDisplayID:")), with: -1)
+//    let _ = deviceConfig.perform(Selector(("setDevice:")), with: nil)
+    let _ = deviceConfig.perform(Selector(("setTransport:")), with: NSNumber(value: 2))
+    
     let dispatchGroup = DispatchGroup()
     let closure: @convention(block) (_ e: NSError?) -> Void = { e in
         defer {
@@ -106,8 +116,11 @@ if (cmd == .Connect || cmd == .Disconnect) {
         }
     }
     dispatchGroup.enter()
-    let method = (cmd == .Connect ? "connectToDevice:completion:" : "disconnectFromDevice:completion:")
-    _ = manager.perform(Selector((method)), with: targetDevice, with: closure)
+//    let method = (cmd == .Connect ? "connectToDevice:completion:" : "disconnectFromDevice:completion:")
+//    _ = manager.perform(Selector((method)), with: targetDevice, with: closure)
+    
+    let methodIMP: IMP! = manager.method(for: Selector(("connectToDevice:withConfig:completion:")))
+    unsafeBitCast(methodIMP,to:(@convention(c)(Any?,Selector,Any?,Any?,Any?)->Void).self)(manager,Selector(("connectToDevice:withConfig:completion:")),targetDevice, deviceConfig, closure)
     dispatchGroup.wait()
     
 } else {
