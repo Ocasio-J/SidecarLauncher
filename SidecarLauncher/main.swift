@@ -20,26 +20,26 @@ func printHelp() {
     let sidecarLauncher = "./SidecarLauncher"
     let help = """
         Commands:
-            \(Command.Devices)
+            \(Command.Devices.rawValue)
                        List names of reachable sidecar capable devices.
-                       Example: \(sidecarLauncher) \(Command.Devices)
+                       Example: \(sidecarLauncher) \(Command.Devices.rawValue)
         
-            \(Command.Connect) <device_name> [\(Option.WiredConnection)]
+            \(Command.Connect.rawValue) <device_name> [\(Option.WiredConnection.rawValue)]
                        Connect to device with the specified name. Use quotes aroung device_name.
-                       Example: \(sidecarLauncher) \(Command.Connect) "Joe‘s iPad" \(Option.WiredConnection)
+                       Example: \(sidecarLauncher) \(Command.Connect.rawValue) "Joe‘s iPad" \(Option.WiredConnection.rawValue)
                        
                        WARNING:
-                       \(Option.WiredConnection) is an experimental option that tries to force a wired connection
-                       when initializing a Sidecar session. The information below is based on limited observations.
+                       \(Option.WiredConnection.rawValue) is an experimental option that tries to force a wired connection when initializing a Sidecar
+                       session. The information below is based on limited observations.
                        An error is returned if there is no cable connected. It will not fallback to a wireless connection.
                        Once the connection succeeds with this option, the Sidecar session will *only* work with a cable
                        connection. If the cable is disconnected, it will not automatically fallback to a wireless connection.
                        Nor will it automatically reconnect when the cable is reconnected. The session needs to be terminated
                        and a new connection needs to be established.
         
-            \(Command.Disconnect) <device_name>
+            \(Command.Disconnect.rawValue) <device_name>
                        Disconnect from device with the specified name. Use quotes.
-                       Example: \(sidecarLauncher) \(Command.Disconnect) "Joe‘s iPad"
+                       Example: \(sidecarLauncher) \(Command.Disconnect.rawValue) "Joe‘s iPad"
         
         Exit Codes:
             0    Command completed successfully
@@ -161,11 +161,6 @@ if (cmd == .Connect || cmd == .Disconnect) {
         _ = manager.perform(Selector(("disconnectFromDevice:completion:")), with: targetDevice, with: closure)
     }
     dispatchGroup.wait()
-    
-//    guard let deviceConfig = manager.perform(Selector(("configForDevice:")), with: targetDevice)?.takeUnretainedValue() as? NSObject else {
-//        print("cry")
-//        exit(99)
-//    }
     
 } else {
     let deviceNames = devices.map{$0.perform(Selector(("name")))?.takeUnretainedValue() as! String}
