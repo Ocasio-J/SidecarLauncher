@@ -74,7 +74,7 @@ if (cmd == .Connect || cmd == .Disconnect) {
     
     targetDeviceName = CommandLine.arguments[2].lowercased()
     
-    if (CommandLine.arguments.count == 4) {
+    if (CommandLine.arguments.count > 3) {
         let optionArg = CommandLine.arguments[3].lowercased()
         guard let validOption = Option(rawValue: optionArg) else {
             print("Invalid option specified: \(optionArg)")
