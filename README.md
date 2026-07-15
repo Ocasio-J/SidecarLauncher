@@ -15,7 +15,9 @@ Disconnect from device:
 
 `./SidecarLauncher disconnect "My iPad"`
 
-Initially validated on Mac OS 14.2.1. Subject to break on macOS updates due to use of private APIs.
+Initially validated on Mac OS 14.2.1. Confirmed working on macOS Tahoe 26.5.1 (built from source). Subject to break on macOS updates due to use of private APIs.
+
+Note: `connect` fails with `SidecarErrorDeviceWiFiNotEnabled` (code -203) if the target device is locked or asleep, even though it still appears in `devices`. Wake and unlock the device, then retry.
 
 Use [this convenient shorcut](https://github.com/Ocasio-J/SidecarLauncher/raw/main/Sidecar%20Launcher.shortcut) to trigger Sidecar from an iPad.
 See comments in the shortcut for some important notes.
