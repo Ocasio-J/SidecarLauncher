@@ -1,0 +1,500 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAME="${NAME:-iPad}"
+
+VENDOR_VDISP="0x5644"
+VENDOR_SIDECAR="0x6161706c"
+MODEL_SIDECAR="0x69506164"
+
+POLL_INTERVAL=0.5
+VDISP_TIMEOUT=10
+CONNECT_ATTEMPTS=5
+CONNECT_SETTLE=3
+RETRY_DELAY=5
+DOWN_TIMEOUT=5
+
+SELF="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SELF" ]; do
+  LINK_DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in
+    /*) ;;
+    *) SELF="$LINK_DIR/$SELF" ;;
+  esac
+done
+BIN="$(cd -P "$(dirname "$SELF")" && pwd)"
+TOOLS="$(cd -P "$BIN/.." && pwd)"
+LOGS="$TOOLS/logs"
+LOG="$LOGS/sidecar.log"
+RES_FILE="$TOOLS/state/resolution"
+
+mkdir -p "$LOGS" "$TOOLS/state" 2>/dev/null || true
+
+ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
+log() { printf '%s %s\n' "$(ts)" "$*" >>"$LOG" 2>/dev/null || true; }
+info() { log "$*"; printf '%s\n' "$*"; }
+warn() { log "WARN $*"; printf 'WARN: %s\n' "$*" >&2; }
+fail() { log "ERROR $*"; printf 'ERROR: %s\n' "$*" >&2; }
+
+need_bin() {
+  local b
+  for b in "$@"; do
+    if [ ! -x "$BIN/$b" ]; then
+      fail "missing or non-executable binary: $BIN/$b (run ./build.sh)"
+      return 1
+    fi
+  done
+}
+
+dispid_out() { "$BIN/dispid" 2>/dev/null || true; }
+
+vdisp_pid() {
+  { pgrep -f "$BIN/vdisp" 2>/dev/null || true; pgrep -x vdisp 2>/dev/null || true; } | head -n 1
+}
+
+virtual_display_present() {
+  dispid_out | grep -qE "vendor=$VENDOR_VDISP([[:space:]]|$)"
+}
+
+sidecar_connected() {
+  dispid_out | grep -qE "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR"
+}
+
+builtin_present() {
+  dispid_out | grep -qE 'builtin=true'
+}
+
+display_line() {
+  dispid_out | grep -E "$1" | head -n 1
+}
+
+field() {
+  printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -n 1
+}
+
+resolution() {
+  printf '%s\n' "$1" | awk '{print $NF}'
+}
+
+is_main() {
+  printf '%s\n' "$1" | tr ' ' '\n' | grep -qx 'main=true'
+}
+
+lid_state() {
+  local out=""
+  out="$(ioreg -r -k AppleClamshellState 2>/dev/null)" || out=""
+  case "$out" in
+    *'"AppleClamshellState" = Yes'*) printf 'closed' ;;
+    *'"AppleClamshellState" = No'*) printf 'open' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+mirror_state() {
+  local out="" value=""
+  out="$(system_profiler SPDisplaysDataType 2>/dev/null)" || out=""
+  if [ -z "$out" ]; then
+    printf 'n/a'
+    return 0
+  fi
+  value="$(printf '%s\n' "$out" | awk '
+    /^[[:space:]]+[^[:space:]].*:[[:space:]]*$/ {
+      name=$0
+      sub(/^[[:space:]]+/, "", name)
+      sub(/:[[:space:]]*$/, "", name)
+    }
+    /Mirror:[[:space:]]*/ { if (name ~ /Sidecar/) { sub(/.*Mirror:[[:space:]]*/, ""); print; exit } }
+  ')"
+  if [ -z "$value" ]; then
+    printf 'n/a'
+    return 0
+  fi
+  case "$value" in
+    [Oo]n*|[Yy]es*|[Ss]ì*|[Ss]i*|[Aa]ttiv*|1) printf 'yes' ;;
+    [Oo]ff*|[Nn]o*|[Dd]isattiv*|0) printf 'no' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+read_state_resolution() {
+  local v=""
+  if [ -f "$RES_FILE" ]; then
+    v="$(tr '\n' ' ' <"$RES_FILE" 2>/dev/null | sed 's/[[:space:]]*$//')" || v=""
+  fi
+  printf '%s' "$v"
+}
+
+res_show() {
+  local raw block current saved
+  raw="$("$BIN/dispmode" 2>/dev/null || true)"
+  if [ -z "$raw" ]; then
+    fail "cannot read display modes (bin/dispmode)"
+    return 1
+  fi
+
+  block="$(printf '%s\n' "$raw" | awk -v v="vendor=$VENDOR_SIDECAR" '
+    /^display / { insb = ($3 == v); next }
+    insb && !/^[[:space:]]*$/ { print }
+  ')"
+  current="$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*NOW: //p' | head -n 1)"
+  saved="$(read_state_resolution)"
+
+  printf 'sidecar display: id=%s\n' "$(field "$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")" id)"
+  printf 'current:         %s\n' "${current:-unknown}"
+  printf 'HiDPI:\n'
+  if printf '%s\n' "$block" | grep -q '<-- HiDPI'; then
+    printf '%s\n' "$block" | grep '<-- HiDPI' | sed 's/^[[:space:]]*/  /; s/[[:space:]]*<-- HiDPI$//'
+  else
+    printf '  no HiDPI mode available\n'
+  fi
+  printf 'saved:           %s\n' "${saved:-none}"
+  printf 'apply with:      sidecar res WxH\n'
+  return 0
+}
+
+apply_saved_resolution() {
+  local target
+  target="$(read_state_resolution)"
+  if [ -z "$target" ]; then
+    return 0
+  fi
+  need_bin setmode || return 0
+  if "$BIN/setmode" "$target" >>"$LOGS/setmode.log" 2>&1; then
+    info "resolution $target applied (state/resolution)"
+  else
+    warn "resolution $target not available, keeping the current one (see $LOGS/setmode.log)"
+  fi
+  return 0
+}
+
+disconnect_quiet() {
+  local out="" rc=0
+  out="$("$BIN/SidecarLauncher" disconnect "$NAME" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "disconnect \"$NAME\" exit $rc (ignored): $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+  return 0
+}
+
+usage() {
+  cat <<EOF
+usage: sidecar <command>
+
+  ensure    make sure the virtual display ($VENDOR_VDISP) is up
+  up        ensure + connect to "$NAME" + saved resolution + mirror
+  down      disconnect from "$NAME" (idempotent)
+  status    lid, vdisp, Sidecar and mirror state (read-only)
+  res       current mode and HiDPI modes of the Sidecar display; res WxH sets and saves one
+
+variables:
+  NAME      name of the Sidecar device (default: iPad)
+
+files:
+  log       $LOG
+  state     $RES_FILE (resolution reapplied by every "up")
+EOF
+}
+
+usage_ensure() {
+  cat <<EOF
+usage: sidecar ensure [--help]
+
+Starts bin/vdisp if it is not already running, then waits up to ${VDISP_TIMEOUT}s for a
+display with vendor $VENDOR_VDISP to appear.
+
+exit 0 if the virtual display is up, 1 otherwise.
+EOF
+}
+
+usage_up() {
+  cat <<EOF
+usage: sidecar up [--help]
+
+1. ensure the virtual display
+2. disconnect from "$NAME" to clear zombie sessions (errors ignored)
+3. up to $CONNECT_ATTEMPTS connect attempts, ${RETRY_DELAY}s apart; an attempt counts only
+   with exit 0 and the $VENDOR_SIDECAR display present ${CONNECT_SETTLE}s later
+4. the resolution saved in state/resolution, if any
+5. mirror the Sidecar display onto the built-in one, when a built-in exists
+   (with the lid closed the mirror is skipped and the command still succeeds)
+
+exit 0 if Sidecar is connected, 1 otherwise.
+EOF
+}
+
+usage_down() {
+  cat <<EOF
+usage: sidecar down [--help]
+
+Disconnects "$NAME" and waits up to ${DOWN_TIMEOUT}s for the Sidecar display to go away.
+Idempotent: with no session it exits 0.
+
+exit 0 if no Sidecar display is left, 1 otherwise.
+EOF
+}
+
+usage_status() {
+  cat <<EOF
+usage: sidecar status [--help]
+
+Prints the lid state (open/closed), vdisp, the Sidecar display (id and resolution) and
+the mirror state. Changes nothing.
+
+exit 0 if Sidecar is connected, 1 if not.
+EOF
+}
+
+usage_res() {
+  cat <<EOF
+usage: sidecar res [WxH] [--help]
+
+Without arguments: current mode of the Sidecar display and the HiDPI modes available
+(read-only).
+
+With WxH (e.g. 1165x809): apply the mode, save it in state/resolution and reapply it on
+every successful "sidecar up".
+
+Requires a connected Sidecar display.
+exit 0 if the mode was read or applied, 1 otherwise.
+EOF
+}
+
+cmd_ensure() {
+  local pid="" i
+  need_bin vdisp dispid || return 1
+
+  if virtual_display_present; then
+    pid="$(vdisp_pid)"
+    if [ -n "$pid" ]; then
+      info "virtual display $VENDOR_VDISP already up (vdisp pid $pid)"
+    else
+      info "virtual display $VENDOR_VDISP already up (no vdisp process found)"
+    fi
+    return 0
+  fi
+
+  pid="$(vdisp_pid)"
+  if [ -n "$pid" ]; then
+    info "vdisp running (pid $pid), waiting for the virtual display"
+  else
+    info "starting vdisp"
+    nohup "$BIN/vdisp" >>"$LOGS/vdisp.log" 2>&1 &
+    disown 2>/dev/null || true
+  fi
+
+  for i in $(seq 1 $((VDISP_TIMEOUT * 2))); do
+    if virtual_display_present; then
+      info "virtual display $VENDOR_VDISP up"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+
+  fail "virtual display $VENDOR_VDISP did not appear within ${VDISP_TIMEOUT}s (see $LOGS/vdisp.log)"
+  return 1
+}
+
+cmd_up() {
+  local attempt rc out line ok=0
+  need_bin vdisp dispid SidecarLauncher mirror setmode || return 1
+
+  cmd_ensure || return 1
+
+  info "clearing previous sessions for \"$NAME\""
+  disconnect_quiet
+  sleep 1
+
+  for attempt in $(seq 1 "$CONNECT_ATTEMPTS"); do
+    info "connect \"$NAME\" (attempt $attempt/$CONNECT_ATTEMPTS)"
+    rc=0
+    out="$("$BIN/SidecarLauncher" connect "$NAME" 2>&1)" || rc=$?
+    out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    log "connect \"$NAME\" exit $rc: ${out:-no output}"
+
+    if [ "$rc" -eq 0 ]; then
+      sleep "$CONNECT_SETTLE"
+      if sidecar_connected; then
+        line="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+        info "Sidecar connected (id=$(field "$line" id), $(resolution "$line"))"
+        ok=1
+        break
+      fi
+      warn "connect returned ok but the Sidecar display did not appear (attempt $attempt)"
+    else
+      warn "connect failed with exit $rc: ${out:-no output} (attempt $attempt)"
+    fi
+
+    if [ "$attempt" -lt "$CONNECT_ATTEMPTS" ]; then
+      sleep "$RETRY_DELAY"
+    fi
+  done
+
+  if [ "$ok" -ne 1 ]; then
+    fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts"
+    return 1
+  fi
+
+  apply_saved_resolution
+
+  if builtin_present; then
+    if "$BIN/mirror" >>"$LOGS/mirror.log" 2>&1; then
+      info "mirror applied onto the built-in display"
+    else
+      warn "mirror failed (see $LOGS/mirror.log), the Sidecar session stays up"
+    fi
+  else
+    info "no built-in display (lid closed): mirror skipped"
+  fi
+
+  return 0
+}
+
+cmd_down() {
+  local i
+  need_bin dispid SidecarLauncher || return 1
+
+  disconnect_quiet
+  info "disconnect \"$NAME\" sent"
+
+  for i in $(seq 1 $((DOWN_TIMEOUT * 2))); do
+    sleep "$POLL_INTERVAL"
+    if ! sidecar_connected; then
+      info "no Sidecar display left"
+      return 0
+    fi
+  done
+
+  fail "the Sidecar display is still present after ${DOWN_TIMEOUT}s"
+  return 1
+}
+
+cmd_status() {
+  local lid pid vline sline mirror summary
+
+  need_bin dispid || return 1
+
+  lid="$(lid_state)"
+  printf '%-17s %s\n' 'lid:' "$lid"
+
+  pid="$(vdisp_pid)"
+  if [ -n "$pid" ]; then
+    printf '%-17s %s\n' 'vdisp:' "alive (pid $pid)"
+  else
+    printf '%-17s %s\n' 'vdisp:' "not running"
+  fi
+
+  if virtual_display_present; then
+    vline="$(display_line "vendor=$VENDOR_VDISP")"
+    printf '%-17s %s\n' 'virtual display:' "$VENDOR_VDISP up ($(resolution "$vline"), id=$(field "$vline" id))"
+  else
+    printf '%-17s %s\n' 'virtual display:' "$VENDOR_VDISP absent"
+  fi
+
+  if sidecar_connected; then
+    sline="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+    if is_main "$sline"; then
+      printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"), main)"
+    else
+      printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"))"
+    fi
+  else
+    printf '%-17s %s\n' 'sidecar:' "not connected"
+  fi
+
+  mirror="$(mirror_state)"
+  printf '%-17s %s\n' 'mirror:' "$mirror"
+
+  summary="lid=$lid vdisp=${pid:-no} sidecar=$(sidecar_connected && echo yes || echo no) mirror=$mirror"
+  log "status: $summary"
+
+  if sidecar_connected; then
+    return 0
+  fi
+  return 1
+}
+
+cmd_res() {
+  local target="${1:-}" out="" rc=0
+  need_bin dispid || return 1
+
+  if ! sidecar_connected; then
+    fail "no Sidecar display: connect first with \"sidecar up\""
+    return 1
+  fi
+
+  if [ -z "$target" ]; then
+    need_bin dispmode || return 1
+    res_show
+    return $?
+  fi
+
+  if ! printf '%s' "$target" | grep -Eq '^[0-9]+x[0-9]+$'; then
+    fail "invalid mode: \"$target\" (expected WxH, e.g. 1165x809)"
+    return 1
+  fi
+
+  need_bin setmode || return 1
+
+  out="$("$BIN/setmode" "$target" 2>&1)" || rc=$?
+  out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  log "setmode $target exit $rc: ${out:-no output}"
+
+  if [ "$rc" -ne 0 ]; then
+    fail "mode $target not applied: ${out:-no output}"
+    return 1
+  fi
+
+  if ! printf '%s\n' "$target" >"$RES_FILE"; then
+    fail "mode $target applied but not saved in $RES_FILE"
+    return 1
+  fi
+
+  info "mode $target applied ($out)"
+  info "saved in $RES_FILE: it will be reapplied on every \"sidecar up\""
+  return 0
+}
+
+main() {
+  local cmd
+  if [ "$#" -eq 0 ]; then
+    usage >&2
+    exit 1
+  fi
+
+  case "$1" in
+    -h|--help|help) usage; exit 0 ;;
+    ensure|up|down|status|res) ;;
+    *) fail "unknown command: $1"; usage >&2; exit 1 ;;
+  esac
+
+  cmd="$1"
+  shift
+
+  if [ "$#" -gt 0 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+    "usage_$cmd"
+    exit 0
+  fi
+
+  if [ "$cmd" = res ]; then
+    if [ "$#" -gt 1 ]; then
+      fail "too many arguments: $*"
+      usage_res >&2
+      exit 1
+    fi
+  elif [ "$#" -gt 0 ]; then
+    fail "unrecognised argument: $1"
+    "usage_$cmd" >&2
+    exit 1
+  fi
+
+  case "$cmd" in
+    ensure) if cmd_ensure; then exit 0; else exit 1; fi ;;
+    up) if cmd_up; then exit 0; else exit 1; fi ;;
+    down) if cmd_down; then exit 0; else exit 1; fi ;;
+    status) if cmd_status; then exit 0; else exit 1; fi ;;
+    res) if cmd_res "${1:-}"; then exit 0; else exit 1; fi ;;
+  esac
+}
+
+main "$@"

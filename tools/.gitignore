@@ -1,0 +1,7 @@
+bin/*
+!bin/.gitignore
+!bin/sidecar
+logs/*
+!logs/.gitkeep
+state/*
+!state/.gitkeep
