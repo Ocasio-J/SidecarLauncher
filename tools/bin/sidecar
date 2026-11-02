@@ -399,11 +399,12 @@ current_sidecar_mode() {
 }
 
 connect_with_retries() {
-  local attempt rc out line
+  local attempt rc out line last_out="" last_rc=0
 
   for attempt in $(seq 1 "$CONNECT_ATTEMPTS"); do
     info "connect \"$NAME\" (attempt $attempt/$CONNECT_ATTEMPTS)"
     rc=0
+    last_out=""
     out="$("$BIN/SidecarLauncher" connect "$NAME" 2>&1)" || rc=$?
     out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
     log "connect \"$NAME\" exit $rc: ${out:-no output}"
@@ -417,6 +418,8 @@ connect_with_retries() {
       fi
       warn "connect returned ok but the Sidecar display did not appear (attempt $attempt)"
     else
+      last_out="$out"
+      last_rc="$rc"
       case "$(classify_connect "$out" "$rc")" in
         fatal501)
           fail "Sidecar could not create its virtual display (-501).
@@ -440,7 +443,14 @@ displays, then retry. Do not SIGKILL vdisp: it leaves orphan displays."
     fi
   done
 
-  fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts"
+  if [ -n "$last_out" ] && printf '%s' "$last_out" | grep -qE -- '-455|SidecarErrorDisplayAWDLDegraded'; then
+    fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts
+The last error was -455 (AWDL degraded). If the iPad is visible in \`sidecar\`
+but refuses every attempt, its radio state is likely stale:
+toggle Wi-Fi and Bluetooth on the iPad, turn off Low Power Mode, then retry."
+  else
+    fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts"
+  fi
   return 1
 }
 
@@ -650,6 +660,7 @@ check_bad() {
 
 cmd_doctor() {
   local problems=0 lid pids pcount vcount scount probe_out probe_rc probe_state cdev devices sline
+  local dev_out dev_rc
 
   need_bin dispid || return 1
 
@@ -665,6 +676,14 @@ cmd_doctor() {
     1) probe_state="disconnected" ;;
     *) probe_state="unknown" ;;
   esac
+
+  dev_rc=0
+  dev_out=""
+  if [ -x "$BIN/SidecarLauncher" ]; then
+    dev_out="$("$BIN/SidecarLauncher" devices 2>&1)" || dev_rc=$?
+  else
+    dev_rc=127
+  fi
 
   pids="$(vdisp_pids)"
   pids="$(printf '%s' "$pids" | sed 's/[[:space:]]*$//')"
@@ -731,6 +750,10 @@ cmd_doctor() {
       check_info "connectedDevices probe unavailable: Sidecar state is inferred from the display list (see README)"
       ;;
   esac
+
+  if [ "$probe_state" != "connected" ] && [ "$dev_rc" -eq 0 ]; then
+    check_info "device reachable but not connected: a persistent -455 is usually the iPad radio state (see Troubleshooting)"
+  fi
 
   if [ "$lid" = "closed" ] && [ "$scount" -gt 0 ]; then
     sline="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"

@@ -175,7 +175,7 @@ Without `state/resolution` there is a single connect and no second pass.
 |---|---|
 | exit 0 and the display appears | connected, continue |
 | exit 0 but no display after 3 s | retry (not an error, just not there yet) |
-| `-455 SidecarErrorDisplayAWDLDegraded` | retry (transient, verified) |
+| `-455 SidecarErrorDisplayAWDLDegraded` | retry (transient, verified); if every attempt fails, see [Troubleshooting](#-455-sidecarerrordisplayawdldegraded-persistent) |
 | `-101 SidecarErrorServiceDisconnected` | retry (transient, verified) |
 | `-203 SidecarErrorDeviceWiFiNotEnabled` | retry (iPad asleep: it wakes and passes) |
 | exit 2 / `No sidecar capable devices detected` | retry (iPad not announced yet) |
@@ -235,6 +235,32 @@ on: they leave it exactly where it is. Only re-enumeration clears it.
 `launchctl kickstart -k` (SIGKILL) or `launchctl bootout`: both were verified to leave the
 display behind. Use `sidecar restart-vdisp`, which sends `SIGTERM` and waits for the old
 display to go away and a new one to appear.
+
+### `-455 SidecarErrorDisplayAWDLDegraded`, persistent
+
+**Symptom.** Every attempt fails with `-455 SidecarErrorDisplayAWDLDegraded`, with strong
+signal, and the iPad is listed by `bin/SidecarLauncher devices`. A single `-455` is normal
+and is retried; this is the case where all five attempts fail.
+
+**What the log says.** AWDL reaches the peer and opens a TCP connection to `…%awdl0`, then
+the *peer closes it*: `Read EOF`, `kConnectionErr`, `-6753`. The iPad is refusing the
+session; it is not a signal or channel problem.
+
+**What fixed it.** Toggle **Wi-Fi and Bluetooth off and on, on the iPad**, turn off Low
+Power Mode and check Handoff. After that the connection succeeded on the first attempt on
+the very same channel that had failed minutes before.
+
+**What does not help.** Changing channel: verified on 5 GHz channel 64 (DFS) and on
+2.4 GHz channel 1, both failing for the same reason. DFS is a red herring. Moving to
+2.4 GHz is not a shortcut either — see below.
+
+**If toggles are not enough.** Reboot the iPad: the radio state is then rebuilt from
+scratch.
+
+**Context: why 5 GHz.** AWDL (Apple Wireless Direct Link) is the side channel Sidecar uses
+to discover and set up the peer. It works best in 5 GHz because on 2.4 GHz it shares the
+antenna with Bluetooth, which is also active for keyboard, trackpad and Handoff; the
+coexistence adds exactly the kind of latency that makes AWDL look "degraded".
 
 ### "The iPad shows an empty desktop"
 
