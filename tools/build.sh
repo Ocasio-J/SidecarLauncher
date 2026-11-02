@@ -15,7 +15,7 @@ SRC="$ROOT/src"
 BIN="$ROOT/bin"
 UPSTREAM="$ROOT/../SidecarLauncher/main.swift"
 
-HELPERS="vdisp mirror dispid dispmode setmode"
+HELPERS="vdisp mirror dispid dispmode setmode connected arrange"
 
 usage() {
   cat <<EOF

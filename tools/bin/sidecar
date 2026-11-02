@@ -13,6 +13,7 @@ CONNECT_ATTEMPTS=5
 CONNECT_SETTLE=3
 RETRY_DELAY=5
 DOWN_TIMEOUT=5
+RESTART_TIMEOUT=15
 
 SELF="${BASH_SOURCE[0]:-$0}"
 while [ -L "$SELF" ]; do
@@ -49,8 +50,46 @@ need_bin() {
 
 dispid_out() { "$BIN/dispid" 2>/dev/null || true; }
 
-vdisp_pid() {
-  { pgrep -f "$BIN/vdisp" 2>/dev/null || true; pgrep -x vdisp 2>/dev/null || true; } | head -n 1
+vdisp_pids() {
+  { pgrep -f "$BIN/vdisp" 2>/dev/null || true; pgrep -x vdisp 2>/dev/null || true; } | sort -u | tr '\n' ' '
+}
+
+vdisp_pid() { vdisp_pids | awk '{print $1}'; }
+
+vdisp_count() { vdisp_pids | wc -w | tr -d ' '; }
+
+count_displays() {
+  dispid_out | grep -cE "$1" || true
+}
+
+sidecar_probe_state() {
+  local rc=0
+  if [ -x "$BIN/connected" ]; then
+    "$BIN/connected" >/dev/null 2>&1 || rc=$?
+  else
+    rc=3
+  fi
+  case "$rc" in
+    0) printf 'connected' ;;
+    1) printf 'disconnected' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+classify_connect() {
+  local out="$1" rc="$2"
+  case "$out" in
+    *-501*|*SidecarErrorVirtualDisplayFailed*) printf 'fatal501'; return 0 ;;
+    *-455*|*SidecarErrorDisplayAWDLDegraded*) printf 'retry'; return 0 ;;
+    *-101*|*SidecarErrorServiceDisconnected*) printf 'retry'; return 0 ;;
+    *-203*|*SidecarErrorDeviceWiFiNotEnabled*) printf 'retry'; return 0 ;;
+    *"No sidecar capable devices"*) printf 'retry'; return 0 ;;
+  esac
+  if [ "$rc" -eq 2 ]; then
+    printf 'retry'
+    return 0
+  fi
+  printf 'fatal'
 }
 
 virtual_display_present() {
@@ -182,9 +221,11 @@ usage() {
 usage: sidecar <command>
 
   ensure    make sure the virtual display ($VENDOR_VDISP) is up
-  up        ensure + connect to "$NAME" + saved resolution + mirror
+  up        ensure + connect to "$NAME" + saved resolution + arrange + mirror
   down      disconnect from "$NAME" (idempotent)
   status    lid, vdisp, Sidecar and mirror state (read-only)
+  doctor    consistency check of displays, vdisp and Sidecar (read-only)
+  restart-vdisp  SIGTERM the virtual display process and wait for a fresh display
   res       current mode and HiDPI modes of the Sidecar display; res WxH sets and saves one
 
 variables:
@@ -213,11 +254,27 @@ usage: sidecar up [--help]
 
 1. ensure the virtual display
 2. disconnect from "$NAME" to clear zombie sessions (errors ignored)
-3. up to $CONNECT_ATTEMPTS connect attempts, ${RETRY_DELAY}s apart; an attempt counts only
-   with exit 0 and the $VENDOR_SIDECAR display present ${CONNECT_SETTLE}s later
-4. the resolution saved in state/resolution, if any
-5. mirror the Sidecar display onto the built-in one, when a built-in exists
-   (with the lid closed the mirror is skipped and the command still succeeds)
+3. pass 1: connect (retries and aborts as listed below)
+4. if state/resolution exists: setmode to that mode
+5. pass 2: disconnect and connect again, so the new session starts with that mode.
+   macOS remembers the mode per display, but a change made on a live session is only
+   reliably applied at the next connection
+6. verify the current mode against state/resolution; a mismatch is a warning, not a
+   failure (run up again, or reconnect the iPad by hand)
+7. with the lid closed, arrange the displays so that Sidecar is at (0,0) and the
+   virtual one sits to its right (bin/arrange): otherwise the virtual display, created
+   first, stays the main display and the iPad shows an empty extended desktop
+8. mirror the Sidecar display onto the built-in one, when a built-in exists
+   (with the lid closed the mirror and the arrangement are skipped and the command
+   still succeeds)
+
+Without state/resolution there is a single connect and no second pass.
+
+Retried (transient, verified): -455 SidecarErrorDisplayAWDLDegraded,
+-101 SidecarErrorServiceDisconnected, -203 SidecarErrorDeviceWiFiNotEnabled,
+exit 2 / "No sidecar capable devices detected".
+Aborted immediately (no retry): -501 SidecarErrorVirtualDisplayFailed and every other
+error, because retrying a corrupted display configuration only adds orphan displays.
 
 exit 0 if Sidecar is connected, 1 otherwise.
 EOF
@@ -241,7 +298,44 @@ usage: sidecar status [--help]
 Prints the lid state (open/closed), vdisp, the Sidecar display (id and resolution) and
 the mirror state. Changes nothing.
 
+Whether Sidecar is connected comes from SidecarDisplayManager.connectedDevices (bin/connected);
+when that probe is unavailable the display list is used instead and a warning says so.
+
 exit 0 if Sidecar is connected, 1 if not.
+EOF
+}
+
+usage_doctor() {
+  cat <<EOF
+usage: sidecar doctor [--help]
+
+Read-only consistency check. Compares:
+  - displays with vendor $VENDOR_VDISP against live vdisp processes (more displays than
+    processes means zombie displays);
+  - the Sidecar display ($VENDOR_SIDECAR) against SidecarDisplayManager.connectedDevices;
+  - vdisp being alive at all (the LaunchAgent's job);
+  - with the lid closed, whether the Sidecar display is the main one (it should be, or
+    the iPad shows an empty extended desktop);
+  - the lid state.
+
+Every problem comes with the action that fixes it. Changes nothing.
+
+exit 0 if everything is consistent, 1 if at least one problem is found.
+EOF
+}
+
+usage_restart_vdisp() {
+  cat <<EOF
+usage: sidecar restart-vdisp [--help]
+
+Sends SIGTERM to the vdisp process(es) found with pgrep and waits up to ${RESTART_TIMEOUT}s
+for the old display ($VENDOR_VDISP) to leave the display list and a new one to appear;
+launchd KeepAlive starts it again with a fresh identity.
+
+SIGTERM lets the process release its display. SIGKILL, "launchctl kickstart -k" and
+"launchctl bootout" do not: they leave an orphan display behind.
+
+exit 0 if the display was rebuilt, 1 if it is still the old one (open and close the lid).
 EOF
 }
 
@@ -295,15 +389,17 @@ cmd_ensure() {
   return 1
 }
 
-cmd_up() {
-  local attempt rc out line ok=0
-  need_bin vdisp dispid SidecarLauncher mirror setmode || return 1
+current_sidecar_mode() {
+  local line
+  line="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+  if [ -z "$line" ]; then
+    return 0
+  fi
+  resolution "$line"
+}
 
-  cmd_ensure || return 1
-
-  info "clearing previous sessions for \"$NAME\""
-  disconnect_quiet
-  sleep 1
+connect_with_retries() {
+  local attempt rc out line
 
   for attempt in $(seq 1 "$CONNECT_ATTEMPTS"); do
     info "connect \"$NAME\" (attempt $attempt/$CONNECT_ATTEMPTS)"
@@ -317,12 +413,26 @@ cmd_up() {
       if sidecar_connected; then
         line="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
         info "Sidecar connected (id=$(field "$line" id), $(resolution "$line"))"
-        ok=1
-        break
+        return 0
       fi
       warn "connect returned ok but the Sidecar display did not appear (attempt $attempt)"
     else
-      warn "connect failed with exit $rc: ${out:-no output} (attempt $attempt)"
+      case "$(classify_connect "$out" "$rc")" in
+        fatal501)
+          fail "Sidecar could not create its virtual display (-501).
+The display configuration is likely corrupted (zombie virtual displays).
+Open and close the lid once to force the WindowServer to re-enumerate
+displays, then retry. Do not SIGKILL vdisp: it leaves orphan displays."
+          return 1
+          ;;
+        retry)
+          warn "connect failed with exit $rc: ${out:-no output} (attempt $attempt), retrying"
+          ;;
+        *)
+          fail "connect failed with exit $rc: ${out:-no output} (not retryable, stopped at attempt $attempt)"
+          return 1
+          ;;
+      esac
     fi
 
     if [ "$attempt" -lt "$CONNECT_ATTEMPTS" ]; then
@@ -330,12 +440,42 @@ cmd_up() {
     fi
   done
 
-  if [ "$ok" -ne 1 ]; then
-    fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts"
-    return 1
-  fi
+  fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts"
+  return 1
+}
 
-  apply_saved_resolution
+cmd_up() {
+  local target current
+  need_bin vdisp dispid SidecarLauncher mirror setmode arrange || return 1
+
+  cmd_ensure || return 1
+
+  info "clearing previous sessions for \"$NAME\""
+  disconnect_quiet
+  sleep 1
+
+  info "pass 1: negotiate with \"$NAME\""
+  connect_with_retries || return 1
+
+  target="$(read_state_resolution)"
+  if [ -z "$target" ]; then
+    info "no saved mode in state/resolution: keeping the negotiated one"
+  else
+    info "applying saved mode $target"
+    apply_saved_resolution
+
+    info "pass 2: reconnect to inherit mode $target"
+    disconnect_quiet
+    sleep 1
+    connect_with_retries || return 1
+
+    current="$(current_sidecar_mode)"
+    if [ "$current" = "$target" ]; then
+      info "mode $target inherited by the new session"
+    else
+      warn "the Sidecar display is at ${current:-unknown}, not $target: run \"sidecar up\" again or reconnect the iPad by hand (see README)"
+    fi
+  fi
 
   if builtin_present; then
     if "$BIN/mirror" >>"$LOGS/mirror.log" 2>&1; then
@@ -344,7 +484,12 @@ cmd_up() {
       warn "mirror failed (see $LOGS/mirror.log), the Sidecar session stays up"
     fi
   else
-    info "no built-in display (lid closed): mirror skipped"
+    info "no built-in display (lid closed): mirror skipped, arranging the desktop"
+    if "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1; then
+      info "desktop arranged: Sidecar at (0,0), virtual display to its right"
+    else
+      warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand"
+    fi
   fi
 
   return 0
@@ -369,10 +514,63 @@ cmd_down() {
   return 1
 }
 
-cmd_status() {
-  local lid pid vline sline mirror summary
+display_id_present() {
+  dispid_out | grep -qE "^id=$1([[:space:]]|$)"
+}
+
+cmd_restart_vdisp() {
+  local pids oldpid pid before after still newpid i id
 
   need_bin dispid || return 1
+
+  pids="$(vdisp_pids)"
+  pids="$(printf '%s' "$pids" | sed 's/[[:space:]]*$//')"
+  if [ -z "$pids" ]; then
+    fail "no vdisp process found: nothing to restart (start it with ./install.sh or \"sidecar ensure\")"
+    return 1
+  fi
+  oldpid="$(printf '%s' "$pids" | awk '{print $1}')"
+
+  before="$(dispid_out | grep -E "vendor=$VENDOR_VDISP([[:space:]]|$)" | sed -n 's/^id=\([0-9][0-9]*\).*/\1/p' | tr '\n' ' ')"
+
+  info "sending SIGTERM to vdisp ($pids)"
+  for pid in $pids; do
+    kill -TERM "$pid" 2>/dev/null || warn "could not send SIGTERM to pid $pid"
+  done
+
+  still=1
+  for i in $(seq 1 $((RESTART_TIMEOUT * 2))); do
+    sleep "$POLL_INTERVAL"
+    still=0
+    for id in $before; do
+      if display_id_present "$id"; then
+        still=1
+      fi
+    done
+    newpid="$(vdisp_pid)"
+    if [ "$still" -eq 0 ] && [ -n "$newpid" ] && [ "$newpid" != "$oldpid" ] && virtual_display_present; then
+      after="$(dispid_out | grep -E "vendor=$VENDOR_VDISP([[:space:]]|$)" | sed -n 's/^id=\([0-9][0-9]*\).*/\1/p' | tr '\n' ' ')"
+      info "vdisp restarted (pid $oldpid -> $newpid), display rebuilt"
+      info "virtual displays: $(printf '%s' "$after" | sed 's/[[:space:]]*$//')"
+      return 0
+    fi
+  done
+
+  if [ "$still" -ne 0 ]; then
+    fail "the old virtual display ($(printf '%s' "$before" | sed 's/[[:space:]]*$//')) is still listed after ${RESTART_TIMEOUT}s: open and close the lid once to re-enumerate the displays"
+    return 1
+  fi
+
+  fail "the display was released but vdisp did not come back within ${RESTART_TIMEOUT}s: start it with ./install.sh or \"sidecar ensure\""
+  return 1
+}
+
+cmd_status() {
+  local lid pid vline sline mirror summary probe sdisp=0 stated
+
+  need_bin dispid || return 1
+
+  probe="$(sidecar_probe_state)"
 
   lid="$(lid_state)"
   printf '%-17s %s\n' 'lid:' "$lid"
@@ -391,26 +589,173 @@ cmd_status() {
     printf '%-17s %s\n' 'virtual display:' "$VENDOR_VDISP absent"
   fi
 
+  sline=""
   if sidecar_connected; then
+    sdisp=1
     sline="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
-    if is_main "$sline"; then
-      printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"), main)"
-    else
-      printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"))"
-    fi
-  else
-    printf '%-17s %s\n' 'sidecar:' "not connected"
   fi
+
+  case "$probe" in
+    connected)
+      stated=connected
+      if [ "$sdisp" -eq 1 ]; then
+        if is_main "$sline"; then
+          printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"), main)"
+        else
+          printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"))"
+        fi
+      else
+        printf '%-17s %s\n' 'sidecar:' "connected, no display listed yet"
+      fi
+      ;;
+    disconnected)
+      stated=disconnected
+      if [ "$sdisp" -eq 1 ]; then
+        printf '%-17s %s\n' 'sidecar:' "not connected (stale display still listed: id=$(field "$sline" id))"
+      else
+        printf '%-17s %s\n' 'sidecar:' "not connected"
+      fi
+      ;;
+    *)
+      warn "connectedDevices probe unavailable: Sidecar state inferred from the display list"
+      if [ "$sdisp" -eq 1 ]; then
+        stated=connected
+        printf '%-17s %s\n' 'sidecar:' "connected (display list only, probe unavailable)"
+      else
+        stated=disconnected
+        printf '%-17s %s\n' 'sidecar:' "not connected (display list only, probe unavailable)"
+      fi
+      ;;
+  esac
 
   mirror="$(mirror_state)"
   printf '%-17s %s\n' 'mirror:' "$mirror"
 
-  summary="lid=$lid vdisp=${pid:-no} sidecar=$(sidecar_connected && echo yes || echo no) mirror=$mirror"
+  summary="lid=$lid vdisp=${pid:-no} sidecar=$stated display_list=$sdisp mirror=$mirror"
   log "status: $summary"
 
-  if sidecar_connected; then
+  if [ "$stated" = connected ]; then
     return 0
   fi
+  return 1
+}
+
+check_ok() { printf 'ok    %s\n' "$1"; }
+check_info() { printf 'info  %s\n' "$1"; }
+check_bad() {
+  problems=$((problems + 1))
+  printf 'FAIL  %s\n' "$1"
+  printf '      fix: %s\n' "$2"
+}
+
+cmd_doctor() {
+  local problems=0 lid pids pcount vcount scount probe_out probe_rc probe_state cdev devices sline
+
+  need_bin dispid || return 1
+
+  probe_rc=0
+  probe_out=""
+  if [ -x "$BIN/connected" ]; then
+    probe_out="$("$BIN/connected" 2>/dev/null)" || probe_rc=$?
+  else
+    probe_rc=3
+  fi
+  case "$probe_rc" in
+    0) probe_state="connected" ;;
+    1) probe_state="disconnected" ;;
+    *) probe_state="unknown" ;;
+  esac
+
+  pids="$(vdisp_pids)"
+  pids="$(printf '%s' "$pids" | sed 's/[[:space:]]*$//')"
+  pcount="$(vdisp_count)"
+  vcount="$(count_displays "vendor=$VENDOR_VDISP([[:space:]]|$)")"
+  scount="$(count_displays "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+  lid="$(lid_state)"
+  devices="$(printf '%s\n' "$probe_out" | sed -n 's/^device=//p' | paste -sd ',' - | sed 's/,/, /g')"
+
+  printf 'doctor: read-only consistency check\n\n'
+  printf '  %-19s %s\n' 'lid:' "$lid"
+  if [ "$pcount" -eq 0 ]; then
+    printf '  %-19s %s\n' 'vdisp:' "no process"
+  elif [ "$pcount" -eq 1 ]; then
+    printf '  %-19s %s\n' 'vdisp:' "1 process (pid $pids)"
+  else
+    printf '  %-19s %s\n' 'vdisp:' "$pcount processes (pids $pids)"
+  fi
+  printf '  %-19s %s\n' '0x5644 displays:' "$vcount"
+  printf '  %-19s %s\n' 'sidecar displays:' "$scount"
+
+  if [ "$probe_state" = "unknown" ]; then
+    cdev="unknown (probe unavailable)"
+  else
+    cdev="$(printf '%s\n' "$probe_out" | sed -n 's/^connected=//p' | head -n 1)"
+    if [ -n "$devices" ]; then
+      cdev="$cdev ($devices)"
+    fi
+  fi
+  printf '  %-19s %s\n' 'connected devices:' "$cdev"
+  printf '\n'
+
+  if [ "$pcount" -eq 0 ]; then
+    check_bad "no vdisp process is running ($vcount display(s) with vendor $VENDOR_VDISP still registered)" \
+      "start the agent: ./install.sh (or launchctl bootstrap gui/$(id -u)); if displays remain with no process, open and close the lid"
+  elif [ "$vcount" -gt "$pcount" ]; then
+    check_bad "$vcount virtual display(s) for $pcount vdisp process(es): zombie displays" \
+      "open and close the lid once to re-enumerate the displays; sidecar restart-vdisp (SIGTERM) only helps when the surplus display still belongs to a live process. kill -9, launchctl kickstart -k and bootout all leave the display behind"
+  elif [ "$vcount" -lt "$pcount" ]; then
+    check_bad "$pcount vdisp process(es) but only $vcount virtual display(s)" \
+      "run sidecar restart-vdisp (SIGTERM, never kill -9), or open and close the lid"
+  else
+    check_ok "one virtual display per vdisp process ($vcount = $pcount)"
+  fi
+
+  case "$probe_state" in
+    connected)
+      if [ "$scount" -eq 0 ]; then
+        check_bad "a device is connected but no Sidecar display ($VENDOR_SIDECAR) is listed" \
+          "wait a few seconds for the session to settle, then run sidecar status; if it persists, sidecar down && sidecar up"
+      else
+        check_ok "Sidecar is connected and its display is listed"
+      fi
+      ;;
+    disconnected)
+      if [ "$scount" -gt 0 ]; then
+        check_bad "a Sidecar display ($VENDOR_SIDECAR) is still listed but no device is connected" \
+          "stale session: run sidecar down, then sidecar up"
+      else
+        check_ok "no Sidecar display and no connected device"
+      fi
+      ;;
+    *)
+      check_info "connectedDevices probe unavailable: Sidecar state is inferred from the display list (see README)"
+      ;;
+  esac
+
+  if [ "$lid" = "closed" ] && [ "$scount" -gt 0 ]; then
+    sline="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+    if is_main "$sline"; then
+      check_ok "lid closed and the Sidecar display is the main one"
+    else
+      check_bad "lid closed but the Sidecar display is not the main one: the desktop is on the virtual display" \
+        "run sidecar up, or bin/arrange, to put Sidecar at (0,0); the virtual display is created first, so it becomes main by default"
+    fi
+  fi
+
+  case "$lid" in
+    closed) check_info "lid closed: mirror not applicable, the virtual display is what keeps Sidecar alive" ;;
+    open) check_info "lid open: a built-in display is available, up can mirror onto it" ;;
+    *) check_info "lid state unknown" ;;
+  esac
+
+  if [ "$problems" -eq 0 ]; then
+    printf '\nresult: consistent\n'
+    log "doctor: consistent (vdisp=$pcount displays=$vcount sidecar=$probe_state lid=$lid)"
+    return 0
+  fi
+
+  printf '\nresult: %d problem(s)\n' "$problems"
+  log "doctor: $problems problem(s) (vdisp=$pcount displays=$vcount sidecar=$probe_state lid=$lid)"
   return 1
 }
 
@@ -456,7 +801,7 @@ cmd_res() {
 }
 
 main() {
-  local cmd
+  local cmd help_fn
   if [ "$#" -eq 0 ]; then
     usage >&2
     exit 1
@@ -464,15 +809,16 @@ main() {
 
   case "$1" in
     -h|--help|help) usage; exit 0 ;;
-    ensure|up|down|status|res) ;;
+    ensure|up|down|status|doctor|restart-vdisp|res) ;;
     *) fail "unknown command: $1"; usage >&2; exit 1 ;;
   esac
 
   cmd="$1"
   shift
+  help_fn="usage_${cmd//-/_}"
 
   if [ "$#" -gt 0 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
-    "usage_$cmd"
+    "$help_fn"
     exit 0
   fi
 
@@ -484,7 +830,7 @@ main() {
     fi
   elif [ "$#" -gt 0 ]; then
     fail "unrecognised argument: $1"
-    "usage_$cmd" >&2
+    "$help_fn" >&2
     exit 1
   fi
 
@@ -493,6 +839,8 @@ main() {
     up) if cmd_up; then exit 0; else exit 1; fi ;;
     down) if cmd_down; then exit 0; else exit 1; fi ;;
     status) if cmd_status; then exit 0; else exit 1; fi ;;
+    doctor) if cmd_doctor; then exit 0; else exit 1; fi ;;
+    restart-vdisp) if cmd_restart_vdisp; then exit 0; else exit 1; fi ;;
     res) if cmd_res "${1:-}"; then exit 0; else exit 1; fi ;;
   esac
 }
