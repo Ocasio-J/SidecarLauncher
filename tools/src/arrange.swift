@@ -43,12 +43,12 @@ guard CGBeginDisplayConfiguration(&cfg) == .success, let c = cfg else {
     exit(1)
 }
 
-var x: Int32 = 0
+var y: Int32 = 0
 var placed: [CGDirectDisplayID] = [sidecar]
 
 let r0 = CGConfigureDisplayOrigin(c, sidecar, 0, 0)
 print("\(label(sidecar)) \(sidecar) (vendor \(vendor(sidecar))) -> (0,0) rc=\(r0.rawValue)")
-x = Int32(CGDisplayPixelsWide(sidecar))
+y = Int32(CGDisplayPixelsHigh(sidecar))
 
 let others = ids.filter { $0 != sidecar }.sorted { a, b in
     let ab = CGDisplayIsBuiltin(a) != 0, bb = CGDisplayIsBuiltin(b) != 0
@@ -57,10 +57,10 @@ let others = ids.filter { $0 != sidecar }.sorted { a, b in
 }
 
 for id in others {
-    let left = x
-    let r = CGConfigureDisplayOrigin(c, id, left, 0)
-    print("\(label(id)) \(id) (vendor \(vendor(id))) -> (\(left),0) rc=\(r.rawValue)")
-    x += Int32(CGDisplayPixelsWide(id))
+    let top = y
+    let r = CGConfigureDisplayOrigin(c, id, 0, top)
+    print("\(label(id)) \(id) (vendor \(vendor(id))) -> (0,\(top)) rc=\(r.rawValue)")
+    y += Int32(CGDisplayPixelsHigh(id))
     placed.append(id)
 }
 
@@ -76,5 +76,5 @@ for id in placed {
     print("origin \(id) = (\(Int(b.origin.x)),\(Int(b.origin.y))) \(Int(b.width))x\(Int(b.height))")
 }
 
-print("result: sidecar \(sidecar) at (0,0), \(others.count) other display(s) to the right")
+print("result: sidecar \(sidecar) at (0,0), \(others.count) other display(s) below it")
 exit(0)

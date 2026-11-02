@@ -253,18 +253,22 @@ usage_up() {
 usage: sidecar up [--help]
 
 1. ensure the virtual display
-2. disconnect from "$NAME" to clear zombie sessions (errors ignored)
-3. pass 1: connect (retries and aborts as listed below)
-4. if state/resolution exists: setmode to that mode
-5. pass 2: disconnect and connect again, so the new session starts with that mode.
-   macOS remembers the mode per display, but a change made on a live session is only
-   reliably applied at the next connection
-6. verify the current mode against state/resolution; a mismatch is a warning, not a
+2. abort if a Sidecar display is listed while no device is connected: that display is
+   orphaned, it occupies the slot Sidecar needs, and connect would fail with -501
+3. disconnect from "$NAME" to clear zombie sessions (errors ignored)
+4. pass 1: connect (retries and aborts as listed below)
+5. if state/resolution exists, compare it with the mode macOS negotiated in pass 1
+6. only when they differ: setmode to the saved mode, then pass 2 (disconnect and connect
+   again) so the new session inherits it. macOS remembers the mode per display, but a
+   change made on a live session is only reliably applied at the next connection. Every
+   connect creates a new Sidecar display id and Universal Control on other devices
+   accumulates duplicate tiles, so there is no reconnect when nothing changes
+7. verify the current mode against state/resolution; a mismatch is a warning, not a
    failure (run up again, or reconnect the iPad by hand)
-7. with the lid closed, arrange the displays so that Sidecar is at (0,0) and the
-   virtual one sits to its right (bin/arrange): otherwise the virtual display, created
+8. with the lid closed, arrange the displays so that Sidecar is at (0,0) and the
+   others are stacked below it (bin/arrange): otherwise the virtual display, created
    first, stays the main display and the iPad shows an empty extended desktop
-8. mirror the Sidecar display onto the built-in one, when a built-in exists
+9. mirror the Sidecar display onto the built-in one, when a built-in exists
    (with the lid closed the mirror and the arrangement are skipped and the command
    still succeeds)
 
@@ -460,6 +464,15 @@ cmd_up() {
 
   cmd_ensure || return 1
 
+  if [ "$(sidecar_probe_state)" = "disconnected" ] && sidecar_connected; then
+    log "aborting before connect: stale Sidecar display listed with no connected device"
+    fail "a stale Sidecar display is still listed but no device is connected.
+A stale display occupies the slot Sidecar needs, and connect would fail with -501.
+Open and close the lid once to force the WindowServer to re-enumerate displays,
+then run this again. \`sidecar down\` cannot remove it: nothing owns that display."
+    return 1
+  fi
+
   info "clearing previous sessions for \"$NAME\""
   disconnect_quiet
   sleep 1
@@ -471,19 +484,24 @@ cmd_up() {
   if [ -z "$target" ]; then
     info "no saved mode in state/resolution: keeping the negotiated one"
   else
-    info "applying saved mode $target"
-    apply_saved_resolution
-
-    info "pass 2: reconnect to inherit mode $target"
-    disconnect_quiet
-    sleep 1
-    connect_with_retries || return 1
-
     current="$(current_sidecar_mode)"
     if [ "$current" = "$target" ]; then
-      info "mode $target inherited by the new session"
+      info "mode $target already negotiated by macOS: no reconnect needed"
     else
-      warn "the Sidecar display is at ${current:-unknown}, not $target: run \"sidecar up\" again or reconnect the iPad by hand (see README)"
+      info "negotiated ${current:-unknown}, saved $target: applying it"
+      apply_saved_resolution
+
+      info "pass 2: reconnect to inherit mode $target"
+      disconnect_quiet
+      sleep 1
+      connect_with_retries || return 1
+
+      current="$(current_sidecar_mode)"
+      if [ "$current" = "$target" ]; then
+        info "mode $target inherited by the new session"
+      else
+        warn "the Sidecar display is at ${current:-unknown}, not $target: run \"sidecar up\" again or reconnect the iPad by hand (see README)"
+      fi
     fi
   fi
 
@@ -496,7 +514,7 @@ cmd_up() {
   else
     info "no built-in display (lid closed): mirror skipped, arranging the desktop"
     if "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1; then
-      info "desktop arranged: Sidecar at (0,0), virtual display to its right"
+      info "desktop arranged: Sidecar at (0,0), other displays below it"
     else
       warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand"
     fi
@@ -740,8 +758,8 @@ cmd_doctor() {
       ;;
     disconnected)
       if [ "$scount" -gt 0 ]; then
-        check_bad "a Sidecar display ($VENDOR_SIDECAR) is still listed but no device is connected" \
-          "stale session: run sidecar down, then sidecar up"
+        check_bad "a Sidecar display ($VENDOR_SIDECAR) is still listed but no device is connected: it is orphaned" \
+          "nothing owns that display, so sidecar down cannot remove it; open and close the lid once to rebuild the display configuration"
       else
         check_ok "no Sidecar display and no connected device"
       fi

@@ -55,7 +55,7 @@ Two consequences worth knowing:
   pid and the current second, so two processes started even one second apart never
   collide.
 
-### Who is the main display
+### Who is the main display, and where the others go
 
 Display origins decide what you see on the iPad. The virtual display is created **before**
 the connect, so it gets origin `(0,0)` and becomes the **main** display; the Sidecar
@@ -63,11 +63,25 @@ display then arrives as a secondary screen to its right. With the lid closed tha
 the iPad shows an empty extended desktop, which looks exactly like "the resolution is
 wrong".
 
-`bin/arrange` fixes the geometry with public API: Sidecar to `(0,0)`, every other display
-chained to its right by `CGDisplayPixelsWide`. `up` calls it automatically when the lid
-is closed (no built-in display), **after** the final connect and before the mirror. When a
-built-in display exists, `arrange` is not called: the physical panel stays main and
-Sidecar is extended or mirrored as before.
+`bin/arrange` fixes the geometry with public API: Sidecar to `(0,0)` and every other
+display **stacked below it**, each new row starting at `y + height` of the previous one
+(`CGDisplayPixelsHigh`). `up` calls it automatically when the lid is closed (no built-in
+display), **after** the final connect and before the mirror. When a built-in display
+exists, `arrange` is not called: the physical panel stays main and Sidecar is extended or
+mirrored as before.
+
+**Why below, and why small.** With the lid closed and Universal Control, the pointer
+enters the Mac from the edge of another screen. If the virtual display sat to the *right*
+of Sidecar, every horizontal entry would land on an invisible 2642-pixel-wide rectangle and
+the cursor would disappear. Stacking the others *under* Sidecar means a horizontal entry
+lands on the iPad, and the only way to reach the placeholder is to go looking for it
+vertically.
+
+The virtual display itself is now **640x480** (`VDISP_WIDTH` / `VDISP_HEIGHT` override the
+default). Its resolution is irrelevant: `DesktopMode` only checks that a non-built-in
+display is active, nothing is ever drawn on it, and a small rectangle leaves little room to
+lose the pointer in. To override it, export the variables before starting `vdisp` by hand,
+or add them under `EnvironmentVariables` in the plist.
 
 The displays involved, as reported by `bin/dispid`:
 
@@ -165,8 +179,8 @@ What `up` really does:
    only reliably applied at the next connection.
 6. verify the current mode against `state/resolution`; a mismatch is a **warning**, not a
    failure.
-7. with the lid closed: `arrange`, so Sidecar is at `(0,0)` and the virtual display is to
-   its right.
+7. with the lid closed: `arrange`, so Sidecar is at `(0,0)` and the others are stacked
+   below it.
 8. with a built-in display: `mirror` onto it.
 
 Without `state/resolution` there is a single connect and no second pass.
@@ -207,11 +221,21 @@ committed. Both forms **require a connected Sidecar display**.
 pixels on a 2× display); delete the file to stop `up` from touching the mode. `setmode`
 prefers the HiDPI variant when more than one mode matches.
 
-`up` closes the loop itself: setmode, then a second connect, then a check — so after `up`
-the session really starts in the saved mode. **`res` on its own does not reconnect**: it
-applies and saves, but the picture on the iPad updates reliably only at the next
-connection. After a bare `sidecar res 1165x809`, run `sidecar up` (or `sidecar down &&
-sidecar up`) to see it.
+`up` closes the loop itself, but only when there is something to close. After the first
+connect it compares the mode macOS negotiated with the saved one:
+
+- **equal** — nothing to inherit: `mode 1321x918 already negotiated by macOS: no reconnect
+  needed`, one connect only;
+- **different** — `setmode` to the saved mode, then a second connect so the new session
+  starts with it, then a check.
+
+The second pass is deliberately conditional: every `connect` creates a new Sidecar display
+id, and Universal Control on the other Macs keeps a tile per id, so reconnecting for
+nothing litters the screen with duplicates.
+
+**`res` on its own does not reconnect**: it applies and saves, but the picture on the iPad
+updates reliably only at the next connection. After a bare `sidecar res 1165x809`, run
+`sidecar up` (or `sidecar down && sidecar up`) to see it.
 
 ## Troubleshooting
 
@@ -225,7 +249,9 @@ in the WindowServer after the process that created it was killed hard. Sidecar r
 create its own virtual display while the configuration is in that state.
 
 **Cure.** Open and close the lid once. The WindowServer re-enumerates the displays and the
-orphans disappear. Then `sidecar up` again.
+orphans disappear. Then `sidecar up` again. `up` refuses to start while an orphaned
+Sidecar display is listed (one with no connected device), instead of spending a connect on
+it; `sidecar down` cannot remove it either, because nothing owns it.
 
 **Why the obvious tools do not work.** An orphaned display is not owned by any process, so
 `kill`, `pkill`, `launchctl bootout` and `CGConfigureDisplayEnabled` have nothing to act
@@ -274,7 +300,7 @@ reconnecting.
 ./bin/sidecar status
 # lid:              closed
 # vdisp:            alive (pid 77186)
-# virtual display:  0x5644 up (2642x1836, id=34)
+# virtual display:  0x5644 up (640x480, id=34)
 # sidecar:          connected (id=33, 1321x918, main)
 # mirror:           no
 
@@ -309,7 +335,9 @@ limitation as `info`, not as a failure.
 | the iPad must be awake and unlocked | even then `connect` can fail with `-203 SidecarErrorDeviceWiFiNotEnabled`; wake it and retry |
 | several virtual displays can coexist | each instance has its own `product`/`serial`. A second one without a process is a zombie: `doctor` reports it, the lid cycle removes it |
 | the virtual display dies with its process | but only if the process exits cleanly: see the rules at the top |
-| the mode is chosen by Sidecar | every `connect` negotiates its own mode, which is why `state/resolution` exists and `up` reapplies it with a second connect |
+| the placeholder is still a display | 640x480 under Sidecar, but Universal Control can reach it by moving vertically; it is small so the pointer is easy to bring back |
+| the mode is chosen by Sidecar | every `connect` negotiates its own mode, which is why `state/resolution` exists and `up` reapplies it — with a second connect only when the negotiated mode differs |
+| every connect is a new display | each `connect` produces a fresh Sidecar display id, and **Universal Control on other devices can accumulate duplicate tiles** for the displays it has seen. Fewer reconnects means fewer tiles; stale ones disappear with a logout or a restart of the device showing them |
 | no graphical session, no agent | `LimitLoadToSessionType Aqua` means the agent runs only inside a logged-in desktop session |
 | private APIs | `CGVirtualDisplay` and `SidecarCore` are not public; a macOS update can break either, and the probe in `bin/connected` exits 3 instead of crashing when an accessor disappears |
 | one model tested | MacBook Air M5, macOS 27.2. `DesktopMode` behaviour may differ elsewhere |
