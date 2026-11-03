@@ -265,9 +265,11 @@ usage: sidecar up [--help]
    accumulates duplicate tiles, so there is no reconnect when nothing changes
 7. verify the current mode against state/resolution; a mismatch is a warning, not a
    failure (run up again, or reconnect the iPad by hand)
-8. with the lid closed, arrange the displays so that Sidecar is at (0,0) and the
-   others are stacked below it (bin/arrange): otherwise the virtual display, created
-   first, stays the main display and the iPad shows an empty extended desktop
+8. with the lid closed, arrange the displays so that the virtual display is main at
+   (0,0) and Sidecar mirrors it (bin/arrange). Measured on a closed lid: Universal
+   Control holds ~4 minutes this way, ~1 minute with Sidecar as main. The mirrored
+   desktop is as big as the virtual display, which is why its size comes from the
+   LaunchAgent environment (1321x918) rather than the 640x480 default
 9. mirror the Sidecar display onto the built-in one, when a built-in exists
    (with the lid closed the mirror and the arrangement are skipped and the command
    still succeeds)
@@ -514,7 +516,7 @@ then run this again. \`sidecar down\` cannot remove it: nothing owns that displa
   else
     info "no built-in display (lid closed): mirror skipped, arranging the desktop"
     if "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1; then
-      info "desktop arranged: Sidecar at (0,0), other displays below it"
+      info "desktop arranged: virtual display is main, Sidecar mirrors it"
     else
       warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand"
     fi

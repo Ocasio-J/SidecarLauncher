@@ -4,6 +4,13 @@
 <dict>
 	<key>Label</key>
 	<string>local.sidecar.vdisp</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>VDISP_WIDTH</key>
+		<string>1321</string>
+		<key>VDISP_HEIGHT</key>
+		<string>918</string>
+	</dict>
 	<key>ProgramArguments</key>
 	<array>
 		<string>@@TOOLS@@/bin/vdisp</string>

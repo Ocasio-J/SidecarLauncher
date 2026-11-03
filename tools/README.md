@@ -57,31 +57,41 @@ Two consequences worth knowing:
 
 ### Who is the main display, and where the others go
 
-Display origins decide what you see on the iPad. The virtual display is created **before**
-the connect, so it gets origin `(0,0)` and becomes the **main** display; the Sidecar
-display then arrives as a secondary screen to its right. With the lid closed that means
-the iPad shows an empty extended desktop, which looks exactly like "the resolution is
-wrong".
+Display origins decide what you see. The virtual display is created **before** the
+connect, so it already sits at `(0,0)` and is the **main** display; the Sidecar display
+then arrives as a second screen to its right. Left alone, the iPad shows an empty extended
+desktop, which looks exactly like "the resolution is wrong".
 
-`bin/arrange` fixes the geometry with public API: Sidecar to `(0,0)` and every other
-display **stacked below it**, each new row starting at `y + height` of the previous one
-(`CGDisplayPixelsHigh`). `up` calls it automatically when the lid is closed (no built-in
-display), **after** the final connect and before the mirror. When a built-in display
-exists, `arrange` is not called: the physical panel stays main and Sidecar is extended or
-mirrored as before.
+`bin/arrange` turns that into the arrangement that survives longest on a closed lid: the
+**virtual display stays main at `(0,0)`**, every other display is chained to its right,
+and the **Sidecar mirrors the virtual display**. Measured over six minutes of log with no
+other variables: Universal Control held about **1 minute** with Sidecar as main, and about
+**4 minutes** with the virtual display as main and Sidecar mirroring it, recovering by
+itself in ~10 s. It still drops — this makes it last longer, it does not fix it.
 
-**Why below, and why small.** With the lid closed and Universal Control, the pointer
-enters the Mac from the edge of another screen. If the virtual display sat to the *right*
-of Sidecar, every horizontal entry would land on an invisible 2642-pixel-wide rectangle and
-the cursor would disappear. Stacking the others *under* Sidecar means a horizontal entry
-lands on the iPad, and the only way to reach the placeholder is to go looking for it
-vertically.
+A mirrored display cannot be configured, so `arrange` works in phases, each with its own
+`CGBeginDisplayConfiguration`/commit and its return codes on stdout:
 
-The virtual display itself is now **640x480** (`VDISP_WIDTH` / `VDISP_HEIGHT` override the
-default). Its resolution is irrelevant: `DesktopMode` only checks that a non-built-in
-display is active, nothing is ever drawn on it, and a small rectangle leaves little room to
-lose the pointer in. To override it, export the variables before starting `vdisp` by hand,
-or add them under `EnvironmentVariables` in the plist.
+1. clear any mirror on the Sidecar (`kCGNullDirectDisplay`);
+2. put the virtual display at `(0,0)` and the others to its right, adding widths;
+3. mirror the Sidecar onto the virtual display;
+4. verify: the virtual display is main, the Sidecar is in a mirror set.
+
+Re-running it is safe. `up` calls it only when the lid is closed (no built-in display),
+after the final connect and before `bin/mirror`. With a built-in display `arrange` is not
+called: the physical panel stays main and `bin/mirror` mirrors the Sidecar onto it.
+
+### The size of the mirrored desktop
+
+In this arrangement the iPad shows the **virtual** display, so its resolution is the size
+of the desktop that appears there. 640x480, the binary default, is rounded by macOS to
+800x600 and the desktop looks tiny; the LaunchAgent therefore sets `VDISP_WIDTH=1321` and
+`VDISP_HEIGHT=918` under `EnvironmentVariables`.
+
+Those values belong in `daemon/local.sidecar.vdisp.plist.in`, **not** in the installed
+plist: `install.sh` regenerates the file from the template on every run, so hand edits to
+`~/Library/LaunchAgents/local.sidecar.vdisp.plist` are lost. After changing them, re-run
+`./install.sh` so `vdisp` is recreated with the new size.
 
 The displays involved, as reported by `bin/dispid`:
 
@@ -125,6 +135,11 @@ It renders `daemon/local.sidecar.vdisp.plist.in`, replacing `@@TOOLS@@` with the
 path of this folder, writes `~/Library/LaunchAgents/local.sidecar.vdisp.plist`, validates
 it with `plutil -lint`, then `launchctl bootout` (errors ignored) followed by
 `launchctl bootstrap gui/$(id -u)`, and prints the resulting state and pid.
+
+The template also carries the size of the virtual display (`VDISP_WIDTH` / `VDISP_HEIGHT`
+under `EnvironmentVariables`, 1321x918). Because `install.sh` re-renders the plist every
+time, that is the only place those values survive — see
+[The size of the mirrored desktop](#the-size-of-the-mirrored-desktop).
 
 Because `install.sh` boots the agent out, and `bootout` does not release a running
 display, run `./bin/sidecar doctor` afterwards: if it reports a zombie `0x5644` display,
@@ -179,8 +194,8 @@ What `up` really does:
    only reliably applied at the next connection.
 6. verify the current mode against `state/resolution`; a mismatch is a **warning**, not a
    failure.
-7. with the lid closed: `arrange`, so Sidecar is at `(0,0)` and the others are stacked
-   below it.
+7. with the lid closed: `arrange`, so the virtual display is main at `(0,0)`, the others
+   sit to its right and Sidecar mirrors the virtual display.
 8. with a built-in display: `mirror` onto it.
 
 Without `state/resolution` there is a single connect and no second pass.
@@ -220,6 +235,10 @@ committed. Both forms **require a connected Sidecar display**.
 `state/resolution` is one line of plain text, `WxH` in points (`1165x809` means 2330x1618
 pixels on a 2× display); delete the file to stop `up` from touching the mode. `setmode`
 prefers the HiDPI variant when more than one mode matches.
+
+This is the *Sidecar* mode. The size of the mirrored desktop is a different knob: it is
+the resolution of the **virtual** display, set in the LaunchAgent template — see
+[The size of the mirrored desktop](#the-size-of-the-mirrored-desktop).
 
 `up` closes the loop itself, but only when there is something to close. After the first
 connect it compares the mode macOS negotiated with the saved one:
@@ -300,7 +319,7 @@ reconnecting.
 ./bin/sidecar status
 # lid:              closed
 # vdisp:            alive (pid 77186)
-# virtual display:  0x5644 up (640x480, id=34)
+# virtual display:  0x5644 up (1321x918, id=34)
 # sidecar:          connected (id=33, 1321x918, main)
 # mirror:           no
 
@@ -335,7 +354,8 @@ limitation as `info`, not as a failure.
 | the iPad must be awake and unlocked | even then `connect` can fail with `-203 SidecarErrorDeviceWiFiNotEnabled`; wake it and retry |
 | several virtual displays can coexist | each instance has its own `product`/`serial`. A second one without a process is a zombie: `doctor` reports it, the lid cycle removes it |
 | the virtual display dies with its process | but only if the process exits cleanly: see the rules at the top |
-| the placeholder is still a display | 640x480 under Sidecar, but Universal Control can reach it by moving vertically; it is small so the pointer is easy to bring back |
+| the mirrored desktop is the virtual display | with the lid closed the iPad shows the virtual screen: its size (`1321x918` in the template) is the desktop size, and the others sit to its right |
+| Universal Control stays unstable with the lid closed | measured: ~4 minutes before the pointer stops crossing (vs ~1 minute in the other arrangement), ~10 s to recover. Longer, not solved |
 | the mode is chosen by Sidecar | every `connect` negotiates its own mode, which is why `state/resolution` exists and `up` reapplies it — with a second connect only when the negotiated mode differs |
 | every connect is a new display | each `connect` produces a fresh Sidecar display id, and **Universal Control on other devices can accumulate duplicate tiles** for the displays it has seen. Fewer reconnects means fewer tiles; stale ones disappear with a logout or a restart of the device showing them |
 | no graphical session, no agent | `LimitLoadToSessionType Aqua` means the agent runs only inside a logged-in desktop session |
