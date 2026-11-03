@@ -106,7 +106,7 @@ print("  sidecar \(sidecar) in_mirror_set=\(inSet) mirror_of=\(mirrorOf)")
 
 if isMain && inSet && mirrorOf == vdisp {
     print("result: virtual display \(vdisp) is main, Sidecar \(sidecar) mirrors it")
-} else {
-    print("result: arrangement applied but the check is not clean (main=\(isMain) in_mirror_set=\(inSet) mirror_of=\(mirrorOf))")
+    exit(0)
 }
-exit(0)
+print("result: arrangement applied but the check is not clean (main=\(isMain) in_mirror_set=\(inSet) mirror_of=\(mirrorOf))")
+exit(3)

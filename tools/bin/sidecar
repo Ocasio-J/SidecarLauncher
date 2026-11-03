@@ -615,6 +615,7 @@ toggle Wi-Fi and Bluetooth on the iPad, turn off Low Power Mode, then retry."
 }
 
 layout_step() {
+  local rc
   if builtin_present; then
     if "$BIN/mirror" >>"$LOGS/mirror.log" 2>&1; then
       info "mirror applied onto the built-in display"
@@ -623,11 +624,13 @@ layout_step() {
     fi
   else
     info "no built-in display (lid closed): mirror skipped, arranging the desktop"
-    if "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1; then
-      info "desktop arranged: virtual display is main, Sidecar mirrors it"
-    else
-      warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand"
-    fi
+    rc=0
+    "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1 || rc=$?
+    case "$rc" in
+      0) info "desktop arranged: virtual display is main, Sidecar mirrors it" ;;
+      3) warn "arrange applied but not verified (see $LOGS/arrange.log)" ;;
+      *) warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand" ;;
+    esac
   fi
 }
 

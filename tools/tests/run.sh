@@ -435,6 +435,29 @@ check "B2: mirror prints already mirrored" grep -q 'already mirrored: sidecar' "
 check "B2: mirror exits 1 on a failed commit" grep -q 'r != .success || done != .success' "$TOOLS/src/mirror.swift"
 check "B2: mirror uses selectSidecar" grep -q 'selectSidecar(' "$TOOLS/src/mirror.swift"
 
+CASE "B3: arrange rc 3 is a warning, not a success message"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_ARRANGE_RC=3
+STUB_ARRANGE_OUT="result: arrangement applied but the check is not clean (main=false in_mirror_set=true mirror_of=17)"
+run_sidecar up
+check "arrange unverified: up exits 0" expect_rc 0
+check "arrange unverified: warns" expect_out "WARN: arrange applied but not verified (see"
+check "arrange unverified: no success message" expect_no_out "desktop arranged: virtual display is main"
+
+CASE "B3: arrange rc 3 does not mask other failures"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_ARRANGE_RC=1
+run_sidecar up
+check "arrange failed: up exit 0 (session up)" expect_rc 0
+check "arrange failed: names the manual fix" expect_out "run bin/arrange by hand"
+check "arrange failed: not the unverified warning" expect_no_out "not verified"
+
+CASE "B3: arrange distinguishes a clean result from an unclean one"
+check "B3: arrange exits 3 on an unclean check" grep -q 'exit(3)' "$TOOLS/src/arrange.swift"
+check "B3: arrange still exits 0 when clean" grep -q 'exit(0)' "$TOOLS/src/arrange.swift"
+
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
   exit 1
