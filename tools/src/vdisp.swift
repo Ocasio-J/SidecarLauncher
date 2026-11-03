@@ -8,6 +8,7 @@ let SIDECAR_VENDOR: UInt32 = 0x6161706c
 let ASSERTION_NAME = "local.sidecar.vdisp: Sidecar session"
 let PROBE_TIMEOUT = 5.0
 let EVALUATE_INTERVAL = 30.0
+let SHUTDOWN_DELAY = 0.5
 
 let env = ProcessInfo.processInfo.environment
 
@@ -60,6 +61,7 @@ var probeInFlight = false
 var probeProcess: Process?
 var probeTimedOut = false
 var probeTimer: DispatchSourceTimer?
+var stopping = false
 
 let descC = cls("CGVirtualDisplayDescriptor")
 let setC  = cls("CGVirtualDisplaySettings")
@@ -162,6 +164,7 @@ func applyEvidence(connected: Int, displayID: CGDirectDisplayID) {
 }
 
 func applyProbe(status: Int32, output: String, timedOut: Bool) {
+    if stopping { return }
     if timedOut { releaseAssertion(reason: "probe=timeout"); return }
     guard status == 0 else { releaseAssertion(reason: "probe=\(status)"); return }
     let count = connectedCount(output) ?? 1
@@ -206,6 +209,7 @@ func runProbe() {
 }
 
 func evaluate() {
+    if stopping { return }
     if !keepAwake { releaseAssertion(reason: "env"); return }
     guard !probeInFlight else { return }
     probeInFlight = true
@@ -254,6 +258,27 @@ refreshTimer.resume()
 CGDisplayRegisterReconfigurationCallback({ _, _, _ in
     requestEvaluation()
 }, nil)
+
+func shutdown(_ name: String) {
+    if stopping { return }
+    stopping = true
+    log("shutdown (\(name))")
+    releaseAssertion(reason: "shutdown")
+    virtualDisplay = nil
+    display = nil
+    refreshTimer.cancel()
+    cancelProbeTimer()
+    DispatchQueue.main.asyncAfter(deadline: .now() + SHUTDOWN_DELAY) { exit(0) }
+}
+
+_ = signal(SIGTERM, SIG_IGN)
+_ = signal(SIGINT, SIG_IGN)
+let terminateSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+terminateSource.setEventHandler { shutdown("SIGTERM") }
+terminateSource.resume()
+let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+interruptSource.setEventHandler { shutdown("SIGINT") }
+interruptSource.resume()
 
 evaluate()
 RunLoop.main.run()

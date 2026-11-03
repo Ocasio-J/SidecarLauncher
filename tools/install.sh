@@ -58,9 +58,17 @@ printf 'template:   %s\n' "daemon/$LABEL.plist.in"
 printf 'installed:  %s\n' "$DEST"
 printf 'tools:      %s\n' "$ROOT"
 
+oldpid="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*pid = //p' | head -n 1)"
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+if [ -n "$oldpid" ]; then
+  for _ in $(seq 1 20); do
+    kill -0 "$oldpid" 2>/dev/null || break
+    sleep 0.5
+  done
+fi
 if ! launchctl bootstrap "$DOMAIN" "$DEST"; then
-  die "launchctl bootstrap failed for $DOMAIN (is a graphical session logged in?)"
+  sleep 1
+  launchctl bootstrap "$DOMAIN" "$DEST" || die "launchctl bootstrap failed for $DOMAIN (is a graphical session logged in?)"
 fi
 
 state="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
