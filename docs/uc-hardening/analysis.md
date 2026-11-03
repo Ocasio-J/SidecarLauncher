@@ -339,3 +339,46 @@ read with `uc-analyze` plus the user's markers.
 
 RC2c (spontaneous reconnects) has no test of its own: if it comes back, the recorder
 shows what preceded it.
+
+---
+
+# Event 2026-11-03 12:12 → 13:19: display sleep, then the lid was needed (recorder data)
+
+| time | event |
+|---|---|
+| 11:15:56 | `sidecar down` (switch to the work Mac) → UC↔iPad drop 11:16:12 |
+| 12:01:44 | UC: `Canceling Service` Keyboard from `A051E41E` |
+| 12:01:58–12:02:05 | `sidecar up` → Sidecar 23 connected, mirror on virtual 17; UC↔iPad drop 12:02:02 |
+| **12:11:34** | UC: **`Release Display Sleep Assertion`** (held since 08:20:24, ~3 h 51 min) |
+| **12:12:06** | `Display is turned off` → Sidecar `Display Sleep: Disconnecting` → session closed; UC cancels **both** VHID services of `A051E41E` (keyboard and trackpad): the Mac leaves UC |
+| 12:12:16 | display list: `virtual#17*main sidecar#23`, a Sidecar display left behind, no longer mirrored |
+| 13:17:45 | `sidecar up`: the disconnect is **accepted** (no `-102`: Sidecar still held a session waiting to reconnect on display wake), then connect → **`-501 VirtualDisplayFailed`** (display 23 still present) |
+| 13:18:00 | `Display Wake`, hardware changed; display 23 disappears |
+| 13:18:13–19 | second `sidecar up` → Sidecar 24 connected, arranged |
+| 13:18:15–13:18:50 | Sidecar up, display awake, **no UC service from `A051E41E`** |
+| 13:18:50 | lid opened → built-in display main |
+| 13:19:04 / 13:19:06 | UC: `Activated Service` (trackpad, then keyboard) from `A051E41E`; `Take Display Sleep Assertion` |
+| 13:19:11 | lid closed, arrangement back to virtual main + Sidecar mirror |
+
+**What it confirms.**
+- **RC2b is real and still open.** UC's assertion is not a reliable keep-awake. It was
+  released at 12:11:34, about 10 min after the last UC keyboard service ended (12:01:44),
+  not after 60 min of idle. The display slept 32 s later, because the user had already
+  been idle for more than `displaysleep 10`.
+- **Display sleep does more than end the Sidecar session: it takes this Mac out of UC.**
+  Both VHID services of `A051E41E` were cancelled at 12:12:06. They did not come back when
+  the display woke or when Sidecar reconnected. They came back 14 s after the lid was
+  opened.
+- **Recovering with `sidecar up` while Sidecar waits for display wake fails with `-501`.**
+  `up` disconnects the pending session, and the leftover display 23 blocks the new one.
+  After the wake the leftover was gone and the second `up` worked.
+
+**What it corrects.** The idea that `GlueIdleTimeout = 3600` keeps the assertion for an
+hour of idle is too strong. Today the assertion followed the UC input session from
+`A051E41E`: it was held while that session lived (including the idle hour the user
+reported), and released ~10 min after it ended. The exact rule is unknown; what matters is
+that it cannot be relied on. This makes **A1 (keep-awake owned by `vdisp`) the first fix**.
+
+**Open.** Whether opening the lid is strictly required for UC to re-enumerate, or whether
+waiting longer, or local HID activity on this Mac, would have been enough (UC was absent
+for 35 s before the lid was opened). With A1 in place the situation should not occur.

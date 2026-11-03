@@ -146,6 +146,38 @@ compatible):
 `CONNECT_ATTEMPTS × 30 s` with clear messages; a fake that exits 3 twice then 0 → connected
 at attempt 3.
 
+### A5. Recover from a display-sleep disconnect without `-501`
+
+**Why.** 2026-11-03 13:17:45 (see `UC-DROPS.md`, "Event 12:12 → 13:19"). After
+`Display Sleep: Disconnecting`:
+- Sidecar keeps a session waiting to reconnect on display wake, and the old Sidecar
+  display stays listed;
+- `up` disconnected that session and its connect failed with `-501`;
+- a second `up`, after the display woke, worked.
+
+The stale-display check in `cmd_up` did not fire, because the probe did not say
+`disconnected`.
+
+**Change** in `cmd_up`, before `disconnect_quiet`:
+- **Wake the displays first**: `caffeinate -u -t 2` (declares user activity; no sudo).
+  Then wait up to 10 s for Sidecar to reconnect by itself: poll `sidecar_probe_state` and
+  for a Sidecar line with `mirror_of≠0` or `active=true` (B4).
+- If the session is back and healthy, continue as in A2 (no reconnect).
+- If not, and a Sidecar display is still listed while the probe is not `connected`, wait
+  up to 10 s more for it to disappear before connecting. If it stays, abort with the
+  existing stale-display message instead of spending a connect on `-501`.
+
+**Accept.** Hard to reproduce on demand. Accept by reading the code and with the stub
+harness: a `dispid` stub that lists a Sidecar display for the first N calls, and a
+`connected` stub that returns `connected` after the wake.
+
+### A6. Note for A1
+
+UC's own `PreventUserIdleDisplaySleep` follows UC's input session. It was released at
+12:11:34 on 11-03, ~10 min after the last UC keyboard session ended, and the display
+slept 32 s later. So A1 must not assume that UC keeps the display awake, and `status` (C1)
+should show both owners.
+
 ---
 
 ## Phase B — correctness from the review
