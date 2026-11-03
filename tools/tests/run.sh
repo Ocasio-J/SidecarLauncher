@@ -257,6 +257,39 @@ check "up saved mode differs: exits 0" expect_rc 0
 check "up saved mode differs: two connects" expect_connects 2
 check "up saved mode differs: setmode runs" expect_call "setmode"
 
+CASE "A3: two flaps abort after two connects"
+STUB_CONNECTED_RC=1
+STUB_CONNECT_LEAVES_DISPLAY=0
+run_sidecar up
+check "flap twice: exits 1" expect_rc 1
+check "flap twice: two connects" expect_connects 2
+check "flap twice: names the stale display cause" expect_out "closed right after connecting twice"
+
+CASE "A3: probe connected and no live display fails without a reconnect"
+STUB_CONNECTED_RC=0
+STUB_CONNECT_LEAVES_DISPLAY=0
+run_sidecar up
+check "connected but not live: exits 1" expect_rc 1
+check "connected but not live: one connect" expect_connects 1
+check "connected but not live: no live line message" expect_out "no live Sidecar display appeared"
+
+CASE "A3: probe unknown and no live display fails without a reconnect"
+STUB_CONNECTED_RC=3
+STUB_CONNECT_LEAVES_DISPLAY=0
+run_sidecar up
+check "unknown but not live: exits 1" expect_rc 1
+check "unknown but not live: one connect" expect_connects 1
+check "unknown but not live: says the state is unknown" expect_out "session state is unknown"
+
+CASE "A3: a zombie display is never a success"
+STUB_CONNECTED_RC=0
+STUB_CONNECT_LEAVES_DISPLAY=0
+STUB_ZOMBIE=1
+run_sidecar up
+check "zombie present: exits 1" expect_rc 1
+check "zombie present: one connect" expect_connects 1
+check "zombie present: not connected" expect_no_out "Sidecar connected (id="
+
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
   exit 1

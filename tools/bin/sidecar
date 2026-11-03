@@ -11,6 +11,7 @@ POLL_INTERVAL=0.5
 VDISP_TIMEOUT=10
 CONNECT_ATTEMPTS=5
 CONNECT_SETTLE=3
+CONNECT_DISPLAY_WAIT="${CONNECT_DISPLAY_WAIT:-25}"
 RETRY_DELAY=5
 DOWN_TIMEOUT=5
 RESTART_TIMEOUT=15
@@ -457,8 +458,21 @@ current_sidecar_mode() {
   resolution "$line"
 }
 
+wait_for_live_display() {
+  local wait="$1" i live
+  for i in $(seq 1 $((wait * 2))); do
+    live="$(live_sidecar_line)"
+    if [ -n "$live" ]; then
+      printf '%s\n' "$live"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  return 1
+}
+
 connect_with_retries() {
-  local attempt rc out line last_out="" last_rc=0
+  local attempt rc out live last_out="" last_rc=0 flaps=0
 
   for attempt in $(seq 1 "$CONNECT_ATTEMPTS"); do
     info "connect \"$NAME\" (attempt $attempt/$CONNECT_ATTEMPTS)"
@@ -470,12 +484,28 @@ connect_with_retries() {
 
     if [ "$rc" -eq 0 ]; then
       sleep "$CONNECT_SETTLE"
-      if sidecar_connected; then
-        line="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
-        info "Sidecar connected (id=$(field "$line" id), $(resolution "$line"))"
+      if live="$(wait_for_live_display "$CONNECT_DISPLAY_WAIT")"; then
+        info "Sidecar connected (id=$(field "$live" id), $(resolution "$live"))"
         return 0
       fi
-      warn "connect returned ok but the Sidecar display did not appear (attempt $attempt)"
+      case "$(sidecar_probe_state)" in
+        connected)
+          fail "connect returned ok but no live Sidecar display appeared within ${CONNECT_DISPLAY_WAIT}s and the session still claims connected (run sidecar doctor)"
+          return 1
+          ;;
+        disconnected)
+          flaps=$((flaps + 1))
+          if [ "$flaps" -ge 2 ]; then
+            fail "the session closed right after connecting twice: likely a stale display or the iPad held by another Mac; run sidecar doctor"
+            return 1
+          fi
+          warn "connect returned ok but the session closed before the display appeared (attempt $attempt): not a success, retrying"
+          ;;
+        *)
+          fail "connect returned ok but the session state is unknown (probe unavailable)"
+          return 1
+          ;;
+      esac
     else
       last_out="$out"
       last_rc="$rc"
