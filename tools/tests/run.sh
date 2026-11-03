@@ -458,6 +458,36 @@ CASE "B3: arrange distinguishes a clean result from an unclean one"
 check "B3: arrange exits 3 on an unclean check" grep -q 'exit(3)' "$TOOLS/src/arrange.swift"
 check "B3: arrange still exits 0 when clean" grep -q 'exit(0)' "$TOOLS/src/arrange.swift"
 
+CASE "B5: res explains a mirrored Sidecar"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_MIRROR_OF=17
+run_sidecar res
+check "res mirrored: exits 0" expect_rc 0
+check "res mirrored: names the mirrored display" expect_out "note: Sidecar 22 mirrors display 17; the iPad shows display 17"
+check "res mirrored: names the virtual size" expect_out "(VDISP_WIDTH/HEIGHT = 1321x918)"
+check "res mirrored: says the mode is not what the iPad shows" expect_out "not this mode"
+
+CASE "B5: res WxH still applies and saves with a mirrored Sidecar"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_MIRROR_OF=17
+run_sidecar res 1165x809
+check "res WxH mirrored: exits 0" expect_rc 0
+check "res WxH mirrored: setmode ran" expect_call "setmode 1165x809"
+check "res WxH mirrored: the mode is saved" test -f "$CASE_DIR/state/resolution"
+check "res WxH mirrored: the note is printed" expect_out "mirrors display 17"
+check "res WxH mirrored: reports the saved mode" expect_out "saved in"
+
+CASE "B5: no note when the Sidecar does not mirror anything"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_ACTIVE=true
+STUB_SIDECAR_MIRROR_OF=0
+run_sidecar res
+check "res unmirrored: exits 0" expect_rc 0
+check "res unmirrored: no note" expect_no_out "note: Sidecar"
+
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
   exit 1

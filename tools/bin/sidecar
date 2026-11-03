@@ -213,6 +213,29 @@ read_state_resolution() {
   printf '%s' "$v"
 }
 
+mirror_note() {
+  local line mo vid vline vres
+  line="$(live_sidecar_line)"
+  if [ -z "$line" ]; then
+    return 0
+  fi
+  mo="$(field "$line" mirror_of)"
+  case "$mo" in
+    ''|0|*[!0-9]*) return 0 ;;
+  esac
+  vid="$mo"
+  vline="$(dispid_out | grep -E "^id=$vid([[:space:]]|$)" | head -n 1 || true)"
+  vres="$(resolution "$vline")"
+  if [ -n "$vres" ]; then
+    printf 'note: Sidecar %s mirrors display %s; the iPad shows display %s (VDISP_WIDTH/HEIGHT = %s), not this mode.\n' \
+      "$(field "$line" id)" "$vid" "$vid" "$vres"
+  else
+    printf 'note: Sidecar %s mirrors display %s; the iPad shows display %s (VDISP_WIDTH/HEIGHT), not this mode.\n' \
+      "$(field "$line" id)" "$vid" "$vid"
+  fi
+  return 0
+}
+
 res_show() {
   local raw block current saved
   raw="$("$BIN/dispmode" 2>/dev/null || true)"
@@ -230,6 +253,7 @@ res_show() {
 
   printf 'sidecar display: id=%s\n' "$(field "$(any_sidecar_line)" id)"
   printf 'current:         %s\n' "${current:-unknown}"
+  mirror_note
   printf 'HiDPI:\n'
   if printf '%s\n' "$block" | grep -q '<-- HiDPI'; then
     printf '%s\n' "$block" | grep '<-- HiDPI' | sed 's/^[[:space:]]*/  /; s/[[:space:]]*<-- HiDPI$//'
@@ -451,6 +475,10 @@ Without arguments: current mode of the Sidecar display and the HiDPI modes avail
 With WxH (e.g. 1165x809): apply the mode, save it in state/resolution and reapply it when
 "sidecar up" reconnects. A healthy session is left alone, so the saved mode is not
 reapplied by an idempotent "up": use "sidecar up --force" to reapply it.
+
+When the Sidecar display mirrors another display, both forms print a note naming the
+display the iPad actually shows (the virtual one, sized by VDISP_WIDTH/HEIGHT): the mode
+of the Sidecar display is not what the iPad renders.
 
 Requires a connected Sidecar display.
 exit 0 if the mode was read or applied, 1 otherwise.
@@ -1111,6 +1139,8 @@ cmd_res() {
     fail "invalid mode: \"$target\" (expected WxH, e.g. 1165x809)"
     return 1
   fi
+
+  mirror_note
 
   need_bin setmode || return 1
 
