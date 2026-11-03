@@ -31,6 +31,11 @@ if [ "${STUB_BUILTIN:-0}" = "1" ]; then
     "${STUB_BUILTIN_ID:-1}" "${STUB_BUILTIN_RES:-2880x1800}"
 fi
 
+if [ "${STUB_ZOMBIE:-0}" = "1" ]; then
+  printf 'id=%s vendor=0x6161706c model=0x69506164 serial=0 builtin=false main=false active=false mirror_of=0 asleep=false %s\n' \
+    "${STUB_ZOMBIE_ID:-30}" "${STUB_SIDECAR_RES:-1321x918}"
+fi
+
 if [ "$sidecar" -eq 1 ]; then
   printf 'id=%s vendor=0x6161706c model=0x69506164 serial=0 builtin=false main=%s active=%s mirror_of=%s asleep=%s %s\n' \
     "${STUB_SIDECAR_ID:-22}" "${STUB_SIDECAR_MAIN:-false}" "${STUB_SIDECAR_ACTIVE:-false}" \

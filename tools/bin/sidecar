@@ -106,15 +106,46 @@ virtual_display_present() {
 }
 
 sidecar_connected() {
-  dispid_out | grep -qE "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR"
+  dispid_out | grep -qE "vendor=$VENDOR_SIDECAR([[:space:]]|$)|model=$MODEL_SIDECAR([[:space:]]|$)"
 }
 
 builtin_present() {
-  dispid_out | grep -qE 'builtin=true'
+  dispid_out | grep -qE '(^|[[:space:]])builtin=true([[:space:]]|$)'
 }
 
 display_line() {
-  dispid_out | grep -E "$1" | head -n 1
+  dispid_out | grep -E "$1" | head -n 1 || true
+}
+
+sidecar_lines() {
+  dispid_out | grep -E "vendor=$VENDOR_SIDECAR([[:space:]]|$)|model=$MODEL_SIDECAR([[:space:]]|$)" || true
+}
+
+live_sidecar_line() {
+  sidecar_lines | awk '{
+    id = 0; active = 0; mo = 0
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^id=/) { split($i, a, "="); id = a[2] + 0 }
+      else if ($i == "active=true") { active = 1 }
+      else if ($i ~ /^mirror_of=/) { split($i, a, "="); mo = a[2] + 0 }
+    }
+    if ((active == 1 || mo != 0) && id >= best) { best = id; line = $0 }
+  }
+  END { if (line != "") print line }'
+}
+
+any_sidecar_line() {
+  sidecar_lines | head -n 1
+}
+
+virtual_line() {
+  local main_line
+  main_line="$(dispid_out | grep -E "vendor=$VENDOR_VDISP([[:space:]]|$)" | grep -E '(^|[[:space:]])main=true([[:space:]]|$)' | head -n 1 || true)"
+  if [ -n "$main_line" ]; then
+    printf '%s\n' "$main_line"
+    return 0
+  fi
+  display_line "vendor=$VENDOR_VDISP([[:space:]]|$)"
 }
 
 field() {
@@ -188,7 +219,7 @@ res_show() {
   current="$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*NOW: //p' | head -n 1)"
   saved="$(read_state_resolution)"
 
-  printf 'sidecar display: id=%s\n' "$(field "$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")" id)"
+  printf 'sidecar display: id=%s\n' "$(field "$(any_sidecar_line)" id)"
   printf 'current:         %s\n' "${current:-unknown}"
   printf 'HiDPI:\n'
   if printf '%s\n' "$block" | grep -q '<-- HiDPI'; then
@@ -310,13 +341,15 @@ usage_status() {
   cat <<EOF
 usage: sidecar status [--help]
 
-Prints the lid state (open/closed), vdisp, the Sidecar display (id and resolution) and
-the mirror state. Changes nothing.
+Prints the lid state (open/closed), vdisp, the Sidecar display (id and resolution), the
+mirror as reported by bin/dispid (sidecar N -> M) and, when a session is suspended, that
+its display is asleep.
 
-Whether Sidecar is connected comes from SidecarDisplayManager.connectedDevices (bin/connected);
-when that probe is unavailable the display list is used instead and a warning says so.
+A Sidecar display is "live" when bin/dispid reports active=true or mirror_of != 0. Whether
+Sidecar is connected comes from SidecarDisplayManager.connectedDevices (bin/connected);
+when that probe is unavailable the display list is used and the output says so.
 
-exit 0 if Sidecar is connected, 1 if not.
+exit 0 if Sidecar is connected (or assumed connected), 1 if not.
 EOF
 }
 
@@ -327,10 +360,12 @@ usage: sidecar doctor [--help]
 Read-only consistency check. Compares:
   - displays with vendor $VENDOR_VDISP against live vdisp processes (more displays than
     processes means zombie displays);
-  - the Sidecar display ($VENDOR_SIDECAR) against SidecarDisplayManager.connectedDevices;
+  - the Sidecar display ($VENDOR_SIDECAR) against SidecarDisplayManager.connectedDevices:
+    live/connected is ok, a suspended display (asleep) is info, an orphaned display with
+    no connected device is a problem;
   - vdisp being alive at all (the LaunchAgent's job);
-  - with the lid closed, whether the virtual display is main and the Sidecar mirrors it
-    (the arrangement bin/arrange applies);
+  - with the lid closed, whether the virtual display is main and the live Sidecar mirrors
+    it (the arrangement bin/arrange applies);
   - the lid state.
 
 Every problem comes with the action that fixes it. Changes nothing.
@@ -406,7 +441,10 @@ cmd_ensure() {
 
 current_sidecar_mode() {
   local line
-  line="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+  line="$(live_sidecar_line)"
+  if [ -z "$line" ]; then
+    line="$(any_sidecar_line)"
+  fi
   if [ -z "$line" ]; then
     return 0
   fi
@@ -605,7 +643,7 @@ cmd_restart_vdisp() {
 }
 
 cmd_status() {
-  local lid pid vline sline mirror summary probe sdisp=0 stated
+  local lid pid vline live anyl mirror mirror_flag mirror_line stated probe
 
   need_bin dispid || return 1
 
@@ -622,26 +660,29 @@ cmd_status() {
   fi
 
   if virtual_display_present; then
-    vline="$(display_line "vendor=$VENDOR_VDISP")"
+    vline="$(virtual_line)"
     printf '%-17s %s\n' 'virtual display:' "$VENDOR_VDISP up ($(resolution "$vline"), id=$(field "$vline" id))"
   else
     printf '%-17s %s\n' 'virtual display:' "$VENDOR_VDISP absent"
   fi
 
-  sline=""
-  if sidecar_connected; then
-    sdisp=1
-    sline="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
-  fi
+  live="$(live_sidecar_line)"
+  anyl="$(any_sidecar_line)"
 
   case "$probe" in
     connected)
       stated=connected
-      if [ "$sdisp" -eq 1 ]; then
-        if is_main "$sline"; then
-          printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"), main)"
+      if [ -n "$live" ]; then
+        if is_main "$live"; then
+          printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$live" id), $(resolution "$live"), main)"
         else
-          printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$sline" id), $(resolution "$sline"))"
+          printf '%-17s %s\n' 'sidecar:' "connected (id=$(field "$live" id), $(resolution "$live"))"
+        fi
+      elif [ -n "$anyl" ]; then
+        if [ "$(field "$anyl" asleep)" = "true" ]; then
+          printf '%-17s %s\n' 'sidecar:' "suspended (display $(field "$anyl" id) asleep): waiting for display wake"
+        else
+          printf '%-17s %s\n' 'sidecar:' "connected, display $(field "$anyl" id) listed but not live"
         fi
       else
         printf '%-17s %s\n' 'sidecar:' "connected, no display listed yet"
@@ -649,29 +690,46 @@ cmd_status() {
       ;;
     disconnected)
       stated=disconnected
-      if [ "$sdisp" -eq 1 ]; then
-        printf '%-17s %s\n' 'sidecar:' "not connected (stale display still listed: id=$(field "$sline" id))"
+      if [ -n "$anyl" ]; then
+        printf '%-17s %s\n' 'sidecar:' "not connected (display $(field "$anyl" id) still listed: orphaned)"
       else
         printf '%-17s %s\n' 'sidecar:' "not connected"
       fi
       ;;
     *)
-      warn "connectedDevices probe unavailable: Sidecar state inferred from the display list"
-      if [ "$sdisp" -eq 1 ]; then
+      if [ -n "$live" ]; then
         stated=connected
-        printf '%-17s %s\n' 'sidecar:' "connected (display list only, probe unavailable)"
+        printf '%-17s %s\n' 'sidecar:' "display live (id=$(field "$live" id), $(resolution "$live"), probe unavailable): assumed connected"
+      elif [ -n "$anyl" ]; then
+        stated=disconnected
+        printf '%-17s %s\n' 'sidecar:' "probe unavailable: display $(field "$anyl" id) listed, cannot tell a suspended session from an orphan"
       else
         stated=disconnected
-        printf '%-17s %s\n' 'sidecar:' "not connected (display list only, probe unavailable)"
+        printf '%-17s %s\n' 'sidecar:' "probe unavailable: no Sidecar display listed"
       fi
       ;;
   esac
 
-  mirror="$(mirror_state)"
+  if [ -n "$live" ] || [ -n "$anyl" ]; then
+    if [ -n "$live" ]; then mirror_line="$live"; else mirror_line="$anyl"; fi
+    mirror_flag="$(field "$mirror_line" mirror_of)"
+    if [ -z "$mirror_flag" ]; then
+      mirror="$(mirror_state)"
+      mirror_flag="$mirror"
+    elif [ "$mirror_flag" = "0" ]; then
+      mirror="sidecar $(field "$mirror_line" id) -> none"
+      mirror_flag="no"
+    else
+      mirror="sidecar $(field "$mirror_line" id) -> $mirror_flag"
+      mirror_flag="yes"
+    fi
+  else
+    mirror="n/a"
+    mirror_flag="n/a"
+  fi
   printf '%-17s %s\n' 'mirror:' "$mirror"
 
-  summary="lid=$lid vdisp=${pid:-no} sidecar=$stated display_list=$sdisp mirror=$mirror"
-  log "status: $summary"
+  log "status: lid=$lid vdisp=${pid:-no} sidecar=$stated display_list=$(if [ -n "$anyl" ]; then printf 1; else printf 0; fi) mirror=$mirror_flag"
 
   if [ "$stated" = connected ]; then
     return 0
@@ -688,8 +746,8 @@ check_bad() {
 }
 
 cmd_doctor() {
-  local problems=0 lid pids pcount vcount scount probe_out probe_rc probe_state cdev devices sline
-  local dev_out dev_rc vline vmain mstate
+  local problems=0 lid pids pcount vcount scount probe_out probe_rc probe_state cdev devices
+  local vline live anyl asleep vid sid vmain lmirror
 
   need_bin dispid || return 1
 
@@ -718,9 +776,13 @@ cmd_doctor() {
   pids="$(printf '%s' "$pids" | sed 's/[[:space:]]*$//')"
   pcount="$(vdisp_count)"
   vcount="$(count_displays "vendor=$VENDOR_VDISP([[:space:]]|$)")"
-  scount="$(count_displays "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
+  scount="$(count_displays "vendor=$VENDOR_SIDECAR([[:space:]]|$)|model=$MODEL_SIDECAR([[:space:]]|$)")"
   lid="$(lid_state)"
   devices="$(printf '%s\n' "$probe_out" | sed -n 's/^device=//p' | paste -sd ',' - | sed 's/,/, /g')"
+
+  live="$(live_sidecar_line)"
+  anyl="$(any_sidecar_line)"
+  vline="$(virtual_line)"
 
   printf 'doctor: read-only consistency check\n\n'
   printf '  %-19s %s\n' 'lid:' "$lid"
@@ -760,23 +822,35 @@ cmd_doctor() {
 
   case "$probe_state" in
     connected)
-      if [ "$scount" -eq 0 ]; then
-        check_bad "a device is connected but no Sidecar display ($VENDOR_SIDECAR) is listed" \
-          "wait a few seconds for the session to settle, then run sidecar status; if it persists, sidecar down && sidecar up"
+      if [ -n "$live" ]; then
+        check_ok "Sidecar is connected and its display is live"
+      elif [ -n "$anyl" ]; then
+        asleep="$(field "$anyl" asleep)"
+        if [ "$asleep" = "true" ]; then
+          check_info "Sidecar session suspended: waiting for display wake (display $(field "$anyl" id) asleep); caffeinate -u -t 2, or sidecar up"
+        else
+          check_info "device connected, display $(field "$anyl" id) listed but not live and not asleep: wait, or run sidecar up"
+        fi
       else
-        check_ok "Sidecar is connected and its display is listed"
+        check_info "device connected, no display listed yet: wait"
       fi
       ;;
     disconnected)
-      if [ "$scount" -gt 0 ]; then
-        check_bad "a Sidecar display ($VENDOR_SIDECAR) is still listed but no device is connected: it is orphaned" \
-          "nothing owns that display, so sidecar down cannot remove it; open and close the lid once to rebuild the display configuration"
+      if [ -n "$anyl" ]; then
+        check_bad "Sidecar display orphaned (no connected device): id $(field "$anyl" id)" \
+          "wake first (caffeinate -u -t 2, may re-enumerate); if still listed, open and close the lid"
       else
         check_ok "no Sidecar display and no connected device"
       fi
       ;;
     *)
-      check_info "connectedDevices probe unavailable: Sidecar state is inferred from the display list (see README)"
+      if [ -n "$live" ]; then
+        check_ok "probe unavailable: display live: assume healthy"
+      elif [ -n "$anyl" ]; then
+        check_info "probe unavailable: cannot distinguish a suspended session from an orphan: wake first, re-run doctor; if still listed, open and close the lid"
+      else
+        check_info "probe unavailable: no Sidecar display listed"
+      fi
       ;;
   esac
 
@@ -784,14 +858,14 @@ cmd_doctor() {
     check_info "device reachable but not connected: a persistent -455 is usually the iPad radio state (see Troubleshooting)"
   fi
 
-  if [ "$lid" = "closed" ] && [ "$scount" -gt 0 ]; then
-    vline="$(display_line "vendor=$VENDOR_VDISP")"
-    if is_main "$vline"; then vmain=yes; else vmain=no; fi
-    mstate="$(mirror_state)"
-    if [ "$vmain" = "yes" ] && [ "$mstate" = "yes" ]; then
-      check_ok "lid closed: the virtual display is main and Sidecar mirrors it"
+  if [ "$lid" = "closed" ] && [ -n "$live" ]; then
+    vid="$(field "$vline" id)"
+    sid="$(field "$live" id)"
+    lmirror="$(field "$live" mirror_of)"
+    if [ "$(field "$vline" main)" = "true" ] && [ "$lmirror" = "$vid" ]; then
+      check_ok "lid closed: the virtual display ($vid) is main and Sidecar ($sid) mirrors it"
     else
-      check_bad "lid closed but the desktop is not arranged as intended (virtual main=$vmain, sidecar mirror=$mstate)" \
+      check_bad "lid closed but the desktop is not arranged as intended (virtual $(vid) main=$(field "$vline" main), sidecar $sid mirror_of=${lmirror:-unknown})" \
         "run sidecar up, or bin/arrange, to put the virtual display at (0,0) and mirror Sidecar onto it"
     fi
   fi
