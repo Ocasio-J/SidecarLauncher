@@ -273,7 +273,7 @@ variables:
 
 files:
   log       $LOG
-  state     $RES_FILE (resolution reapplied by every "up")
+  state     $RES_FILE (resolution reapplied when "up" reconnects)
 EOF
 }
 
@@ -290,29 +290,34 @@ EOF
 
 usage_up() {
   cat <<EOF
-usage: sidecar up [--help]
+usage: sidecar up [--force] [--help]
 
 1. ensure the virtual display
-2. abort if a Sidecar display is listed while no device is connected: that display is
-   orphaned, it occupies the slot Sidecar needs, and connect would fail with -501
-3. disconnect from "$NAME" to clear zombie sessions (errors ignored)
-4. pass 1: connect (retries and aborts as listed below)
-5. if state/resolution exists, compare it with the mode macOS negotiated in pass 1
-6. only when they differ: setmode to the saved mode, then pass 2 (disconnect and connect
+2. if the session is already healthy, a live Sidecar display with the probe reporting
+   connected (or unavailable), run the layout step and return 0 without reconnecting:
+   state/resolution is not reapplied on a healthy session. A healthy session is a
+   no-op apart from arranging the desktop, which is idempotent
+3. otherwise reconnect to "$NAME": disconnect first to clear zombie sessions (errors
+   ignored), then pass 1
+4. if state/resolution exists, compare it with the mode macOS negotiated in pass 1
+5. only when they differ: setmode to the saved mode, then pass 2 (disconnect and connect
    again) so the new session inherits it. macOS remembers the mode per display, but a
    change made on a live session is only reliably applied at the next connection. Every
    connect creates a new Sidecar display id and Universal Control on other devices
    accumulates duplicate tiles, so there is no reconnect when nothing changes
-7. verify the current mode against state/resolution; a mismatch is a warning, not a
+6. verify the current mode against state/resolution; a mismatch is a warning, not a
    failure (run up again, or reconnect the iPad by hand)
-8. with the lid closed, arrange the displays so that the virtual display is main at
+7. with the lid closed, arrange the displays so that the virtual display is main at
    (0,0) and Sidecar mirrors it (bin/arrange). Measured on a closed lid: Universal
    Control holds ~4 minutes this way, ~1 minute with Sidecar as main. The mirrored
    desktop is as big as the virtual display, which is why its size comes from the
    LaunchAgent environment (1321x918) rather than the 640x480 default
-9. mirror the Sidecar display onto the built-in one, when a built-in exists
+8. mirror the Sidecar display onto the built-in one, when a built-in exists
    (with the lid closed the mirror and the arrangement are skipped and the command
    still succeeds)
+
+--force skips the healthy-session no-op and performs the full reconnect path, so the
+saved mode is reapplied even on an otherwise-healthy session.
 
 Without state/resolution there is a single connect and no second pass.
 
@@ -396,8 +401,9 @@ usage: sidecar res [WxH] [--help]
 Without arguments: current mode of the Sidecar display and the HiDPI modes available
 (read-only).
 
-With WxH (e.g. 1165x809): apply the mode, save it in state/resolution and reapply it on
-every successful "sidecar up".
+With WxH (e.g. 1165x809): apply the mode, save it in state/resolution and reapply it when
+"sidecar up" reconnects. A healthy session is left alone, so the saved mode is not
+reapplied by an idempotent "up": use "sidecar up --force" to reapply it.
 
 Requires a connected Sidecar display.
 exit 0 if the mode was read or applied, 1 otherwise.
@@ -507,19 +513,41 @@ toggle Wi-Fi and Bluetooth on the iPad, turn off Low Power Mode, then retry."
   return 1
 }
 
+layout_step() {
+  if builtin_present; then
+    if "$BIN/mirror" >>"$LOGS/mirror.log" 2>&1; then
+      info "mirror applied onto the built-in display"
+    else
+      warn "mirror failed (see $LOGS/mirror.log), the Sidecar session stays up"
+    fi
+  else
+    info "no built-in display (lid closed): mirror skipped, arranging the desktop"
+    if "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1; then
+      info "desktop arranged: virtual display is main, Sidecar mirrors it"
+    else
+      warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand"
+    fi
+  fi
+}
+
 cmd_up() {
-  local target current
+  local force="${UP_FORCE:-0}" target current probe live
+
   need_bin vdisp dispid SidecarLauncher mirror setmode arrange || return 1
 
   cmd_ensure || return 1
 
-  if [ "$(sidecar_probe_state)" = "disconnected" ] && sidecar_connected; then
-    log "aborting before connect: stale Sidecar display listed with no connected device"
-    fail "a stale Sidecar display is still listed but no device is connected.
-A stale display occupies the slot Sidecar needs, and connect would fail with -501.
-Open and close the lid once to force the WindowServer to re-enumerate displays,
-then run this again. \`sidecar down\` cannot remove it: nothing owns that display."
-    return 1
+  probe="$(sidecar_probe_state)"
+  live="$(live_sidecar_line)"
+
+  if [ "$force" -eq 0 ] && [ -n "$live" ] && { [ "$probe" = "connected" ] || [ "$probe" = "unknown" ]; }; then
+    if [ "$probe" = "connected" ]; then
+      info "session healthy (id=$(field "$live" id)): no reconnect"
+    else
+      warn "probe unavailable: assuming the live display is the session; use --force to reconnect"
+    fi
+    layout_step
+    return 0
   fi
 
   info "clearing previous sessions for \"$NAME\""
@@ -554,21 +582,7 @@ then run this again. \`sidecar down\` cannot remove it: nothing owns that displa
     fi
   fi
 
-  if builtin_present; then
-    if "$BIN/mirror" >>"$LOGS/mirror.log" 2>&1; then
-      info "mirror applied onto the built-in display"
-    else
-      warn "mirror failed (see $LOGS/mirror.log), the Sidecar session stays up"
-    fi
-  else
-    info "no built-in display (lid closed): mirror skipped, arranging the desktop"
-    if "$BIN/arrange" >>"$LOGS/arrange.log" 2>&1; then
-      info "desktop arranged: virtual display is main, Sidecar mirrors it"
-    else
-      warn "arrange failed (see $LOGS/arrange.log), the session stays up: run bin/arrange by hand"
-    fi
-  fi
-
+  layout_step
   return 0
 }
 
@@ -924,12 +938,15 @@ cmd_res() {
   fi
 
   info "mode $target applied ($out)"
-  info "saved in $RES_FILE: it will be reapplied on every \"sidecar up\""
+  info "saved in $RES_FILE: it is reapplied when \"sidecar up\" reconnects (\"sidecar up --force\" reapplies it on a healthy session)"
   return 0
 }
 
 main() {
   local cmd help_fn
+
+  UP_FORCE=0
+
   if [ "$#" -eq 0 ]; then
     usage >&2
     exit 1
@@ -950,7 +967,15 @@ main() {
     exit 0
   fi
 
-  if [ "$cmd" = res ]; then
+  if [ "$cmd" = up ]; then
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --force) UP_FORCE=1 ;;
+        *) fail "unrecognised argument: $1"; usage_up >&2; exit 1 ;;
+      esac
+      shift
+    done
+  elif [ "$cmd" = res ]; then
     if [ "$#" -gt 1 ]; then
       fail "too many arguments: $*"
       usage_res >&2

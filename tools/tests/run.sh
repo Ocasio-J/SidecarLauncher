@@ -54,13 +54,14 @@ reset_case_env() {
 new_case() {
   CASES=$((CASES + 1))
   CURRENT="$1"
-  BIN="$TMP/bin-$CASES"
-  STUB_DIR="$TMP/stub-$CASES"
-  mkdir -p "$BIN" "$STUB_DIR" "$BIN/logs" "$BIN/state"
+  CASE_DIR="$TMP/case-$CASES"
+  BIN="$CASE_DIR/bin"
+  STUB_DIR="$CASE_DIR/stub"
+  mkdir -p "$BIN" "$STUB_DIR" "$CASE_DIR/logs" "$CASE_DIR/state"
   cp "$STUBS"/* "$BIN"/
   chmod +x "$BIN"/* 2>/dev/null || true
   : >"$STUB_DIR/calls.log"
-  TMP_BIN="$BIN"
+  export STUB_DIR
   reset_case_env
 }
 
@@ -115,6 +116,7 @@ expect_connects() { [ "$(connects)" -eq "$1" ]; }
 expect_disconnects() { [ "$(disconnects)" -eq "$1" ]; }
 expect_probes() { [ "$(probes)" -eq "$1" ]; }
 expect_call() { grep -q "^$1" "$STUB_DIR/calls.log"; }
+expect_no_call() { ! grep -q "^$1" "$STUB_DIR/calls.log"; }
 expect_log() { printf '%s\n' "$1" | grep -qF -- "$2"; }
 
 CASE() { new_case "$1"; }
@@ -190,6 +192,70 @@ STUB_SIDECAR_ASLEEP=false
 run_sidecar status
 check "status: exits 1" expect_rc 1
 check "status: calls the display orphaned" expect_out "orphaned"
+
+CASE "up: healthy session is a no-op but still arranges"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_MIRROR_OF=17
+run_sidecar up
+check "up healthy: exits 0" expect_rc 0
+check "up healthy: no disconnect" expect_disconnects 0
+check "up healthy: no connect" expect_connects 0
+check "up healthy: says the session is healthy" expect_out "session healthy (id=22): no reconnect"
+check "up healthy: still runs the layout step" expect_call "arrange"
+
+CASE "up: probe unknown with a live display assumes healthy and warns"
+STUB_CONNECTED_RC=3
+STUB_SIDECAR_ALWAYS=1
+run_sidecar up
+check "up unknown: exits 0" expect_rc 0
+check "up unknown: no connect" expect_connects 0
+check "up unknown: points at --force" expect_out "use --force to reconnect"
+
+CASE "up: a healthy session does not reapply state/resolution"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_RES=1024x768
+printf '1321x918\n' > "$CASE_DIR/state/resolution"
+run_sidecar up
+check "up healthy with saved mode: exits 0" expect_rc 0
+check "up healthy with saved mode: no connect" expect_connects 0
+check "up healthy with saved mode: no setmode" expect_no_call "setmode"
+check "up healthy with saved mode: no reconnect message" expect_no_out "pass 2"
+
+CASE "up --force reconnects once even on a healthy session"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+run_sidecar up --force
+check "up --force: exits 0" expect_rc 0
+check "up --force: one disconnect" expect_disconnects 1
+check "up --force: one connect" expect_connects 1
+check "up --force: not reported as healthy" expect_no_out "session healthy"
+
+CASE "up: probe disconnected with a live display reconnects"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_FOR_CALLS=2
+run_sidecar up
+check "up disconnected: exits 0" expect_rc 0
+check "up disconnected: reconnects" expect_connects 1
+
+CASE "up: saved mode equals the negotiated mode: one connect, no pass 2"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_RES=1321x918
+printf '1321x918\n' > "$CASE_DIR/state/resolution"
+run_sidecar up
+check "up saved mode equal: exits 0" expect_rc 0
+check "up saved mode equal: one connect" expect_connects 1
+check "up saved mode equal: no setmode" expect_no_call "setmode"
+
+CASE "up: saved mode differs from the negotiated mode: pass 1 + pass 2"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_RES=1024x768
+printf '1321x918\n' > "$CASE_DIR/state/resolution"
+run_sidecar up
+check "up saved mode differs: exits 0" expect_rc 0
+check "up saved mode differs: two connects" expect_connects 2
+check "up saved mode differs: setmode runs" expect_call "setmode"
 
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
