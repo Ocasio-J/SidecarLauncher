@@ -10,6 +10,8 @@
 		<string>1321</string>
 		<key>VDISP_HEIGHT</key>
 		<string>918</string>
+		<key>VDISP_KEEP_AWAKE</key>
+		<string>1</string>
 	</dict>
 	<key>ProgramArguments</key>
 	<array>
