@@ -12,7 +12,8 @@ if [ ! -x "$SIDECAR" ]; then
 fi
 
 TMP="$(mktemp -d /tmp/sidecar-tests.XXXXXX)" || { printf 'run: cannot create a temp dir\n' >&2; exit 1; }
-trap 'rm -rf "$TMP"' EXIT
+VDISP_TEST_PID=""
+trap 'if [ -n "${VDISP_TEST_PID:-}" ]; then kill "$VDISP_TEST_PID" 2>/dev/null || true; fi; rm -rf "$TMP"' EXIT
 
 PASS=0
 FAILED=0
@@ -37,6 +38,9 @@ reset_case_env() {
   unset STUB_ARRANGE_RC STUB_ARRANGE_OUT STUB_MIRROR_RC STUB_MIRROR_OUT
   unset STUB_SETMODE_RC STUB_SETMODE_OUT STUB_DISPMODE_RC STUB_DISPMODE_OUT
   unset STUB_CAFFEINATE_RC STUB_CAFFEINATE_SLEEP
+  unset STUB_DEFAULTS_GLUE STUB_DEFAULTS_RECONNECT
+  unset STUB_PMSET_OUT STUB_PMSET_RC
+  unset STUB_LAUNCHCTL_OUT STUB_LAUNCHCTL_RC
 
   export CONNECT_ATTEMPTS=2
   export CONNECT_SETTLE=0
@@ -58,7 +62,7 @@ new_case() {
   CASE_DIR="$TMP/case-$CASES"
   BIN="$CASE_DIR/bin"
   STUB_DIR="$CASE_DIR/stub"
-  mkdir -p "$BIN" "$STUB_DIR" "$CASE_DIR/logs" "$CASE_DIR/state"
+  mkdir -p "$BIN" "$STUB_DIR" "$CASE_DIR/logs" "$CASE_DIR/state" "$CASE_DIR/home"
   cp "$STUBS"/* "$BIN"/
   chmod +x "$BIN"/* 2>/dev/null || true
   : >"$STUB_DIR/calls.log"
@@ -75,7 +79,7 @@ export_stubs() {
 
 run_sidecar() {
   export_stubs
-  OUT="$(PATH="$BIN:$PATH" SIDECAR_BIN="$BIN" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
+  OUT="$(HOME="$CASE_DIR/home" PATH="$BIN:$PATH" SIDECAR_BIN="$BIN" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
   RC=$?
 }
 
@@ -83,8 +87,22 @@ run_sidecar_with_bin() {
   local bin="$1"
   shift
   export_stubs
-  OUT="$(PATH="$bin:$PATH" SIDECAR_BIN="$bin" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
+  OUT="$(HOME="$CASE_DIR/home" PATH="$bin:$PATH" SIDECAR_BIN="$bin" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
   RC=$?
+}
+
+start_vdisp_stub() {
+  STUB_DIR="$STUB_DIR" STUB_VDISP_SLEEP=30 "$BIN/vdisp" >/dev/null 2>&1 &
+  VDISP_TEST_PID=$!
+  sleep 0.2
+}
+
+stop_vdisp_stub() {
+  if [ -n "${VDISP_TEST_PID:-}" ]; then
+    kill "$VDISP_TEST_PID" 2>/dev/null || true
+    wait "$VDISP_TEST_PID" 2>/dev/null || true
+  fi
+  VDISP_TEST_PID=""
 }
 
 pass() { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
@@ -119,6 +137,7 @@ expect_caffeinates() { [ "$(caffeinates)" -eq "$1" ]; }
 expect_call() { grep -q "^$1" "$STUB_DIR/calls.log"; }
 expect_no_call() { ! grep -q "^$1" "$STUB_DIR/calls.log"; }
 expect_log() { printf '%s\n' "$1" | grep -qF -- "$2"; }
+expect_out_re() { printf '%s\n' "$OUT" | grep -qE -- "$1"; }
 
 CASE() { new_case "$1"; }
 
@@ -487,6 +506,132 @@ STUB_SIDECAR_MIRROR_OF=0
 run_sidecar res
 check "res unmirrored: exits 0" expect_rc 0
 check "res unmirrored: no note" expect_no_out "note: Sidecar"
+
+PMSET_BOTH='Assertion status system-wide:
+   PreventUserIdleDisplaySleep    1
+Listed by owning process:
+   pid 53586(vdisp): [0x1] 00:28:34 PreventUserIdleDisplaySleep named: "local.sidecar.vdisp: Sidecar session"
+   pid 1081(UniversalControl): [0x2] 02:00:18 PreventUserIdleDisplaySleep named: "com.apple.universalcontrol.preventDisplaySleep"'
+
+PMSET_UC_ONLY='Assertion status system-wide:
+   PreventUserIdleDisplaySleep    1
+Listed by owning process:
+   pid 1081(UniversalControl): [0x2] 02:00:18 PreventUserIdleDisplaySleep named: "com.apple.universalcontrol.preventDisplaySleep"'
+
+PMSET_NONE='Assertion status system-wide:
+   PreventUserIdleDisplaySleep    0
+Listed by owning process:'
+
+PMSET_NO_KEYS='Assertion status system-wide:
+   BackgroundTask                 0'
+
+CASE "C1: status shows the UC defaults and both keep-awake owners"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_DEFAULTS_GLUE=3600
+STUB_DEFAULTS_RECONNECT=1
+STUB_PMSET_OUT="$PMSET_BOTH"
+run_sidecar status
+check "status: exits 0" expect_rc 0
+check "status: prints the UC defaults" expect_out_re 'uc defaults: +GlueIdleTimeout=3600 AutomaticallyReconnect=1$'
+check "status: names both owners" expect_out_re 'display awake: +vdisp, UniversalControl$'
+
+CASE "C1: absent UC defaults are labelled unset"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_RC=1
+run_sidecar status
+check "status: unset defaults" expect_out_re 'uc defaults: +GlueIdleTimeout=unset AutomaticallyReconnect=unset$'
+check "status: still exits 0 with a live session" expect_rc 0
+
+CASE "C1: unreadable pmset degrades to unknown"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_RC=1
+run_sidecar status
+check "status: owners unknown" expect_out_re 'display awake: +unknown$'
+
+CASE "C1: pmset without the expected keys degrades to unknown"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_OUT="$PMSET_NO_KEYS"
+run_sidecar status
+check "status: unknown, never invented" expect_out_re 'display awake: +unknown$'
+
+CASE "C1: no owner is reported as none"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_OUT="$PMSET_NONE"
+run_sidecar status
+check "status: no owner" expect_out_re 'display awake: +none$'
+check "status: no invented owner" bash -c 'printf "%s\n" "$1" | grep -qxE "display awake: +none"' _ "$OUT"
+
+CASE "C1: keep-awake shows the newest line from both logs with its age"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+printf '%s keep-awake off (probe=1)\n' "$(date -v-1H +%Y-%m-%dT%H:%M:%S%z)" >"$CASE_DIR/logs/vdisp.out.log"
+printf '%s keep-awake on (connected=1)\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" >"$CASE_DIR/logs/vdisp.log"
+run_sidecar status
+check "status: newest line, with its age" expect_out_re 'keep-awake: +on \(connected=1\) \([0-9]+s ago\)'
+check "status: the older log line is not used" expect_no_out "off (probe=1)"
+
+CASE "C1: a keep-awake line older than 120 s is unknown"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+printf '%s keep-awake on (connected=1)\n' "$(date -v-5M +%Y-%m-%dT%H:%M:%S%z)" >"$CASE_DIR/logs/vdisp.out.log"
+printf '%s keep-awake off (probe=1)\n' "$(date -v-1H +%Y-%m-%dT%H:%M:%S%z)" >"$CASE_DIR/logs/vdisp.log"
+run_sidecar status
+check "status: stale keep-awake is unknown" expect_out_re 'keep-awake: +unknown$'
+check "status: no stale value leaks" expect_no_out "on (connected=1)"
+
+CASE "C1: doctor FAILs when a live session has no vdisp assertion"
+start_vdisp_stub
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_DEFAULTS_GLUE=3600
+STUB_DEFAULTS_RECONNECT=1
+STUB_PMSET_OUT="$PMSET_UC_ONLY"
+STUB_LAUNCHCTL_OUT="	environment = {
+		VDISP_KEEP_AWAKE => 1
+	}"
+run_sidecar doctor
+check "doctor: exits 1" expect_rc 1
+check "doctor: points at the missing assertion" expect_out "vdisp does not hold PreventUserIdleDisplaySleep (owners: UniversalControl)"
+check "doctor: says how to fix it" expect_out "fix: read logs/vdisp.log"
+check "doctor: info line with the defaults and the owners" expect_out "info  uc defaults: GlueIdleTimeout=3600 AutomaticallyReconnect=1; display awake: UniversalControl"
+stop_vdisp_stub
+
+CASE "C1: doctor does not FAIL when vdisp holds its assertion"
+start_vdisp_stub
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_OUT="$PMSET_BOTH"
+run_sidecar doctor
+check "doctor: no missing-assertion FAIL" expect_no_out "does not hold PreventUserIdleDisplaySleep"
+check "doctor: consistent" expect_out "result: consistent"
+stop_vdisp_stub
+
+CASE "C1: doctor does not FAIL when A1 is disabled"
+start_vdisp_stub
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_OUT="$PMSET_UC_ONLY"
+STUB_LAUNCHCTL_OUT="	environment = {
+		VDISP_KEEP_AWAKE => 0
+	}"
+run_sidecar doctor
+check "doctor: A1 off is not a failure" expect_no_out "does not hold PreventUserIdleDisplaySleep"
+stop_vdisp_stub
+
+CASE "C1: doctor does not FAIL on unknown owners"
+start_vdisp_stub
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_PMSET_RC=1
+run_sidecar doctor
+check "doctor: unknown owners are info only" expect_no_out "does not hold PreventUserIdleDisplaySleep"
+check "doctor: unknown is printed" expect_out "display awake: unknown"
+stop_vdisp_stub
 
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then

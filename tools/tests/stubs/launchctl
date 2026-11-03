@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'launchctl %s\n' "$*" >>"$dir/calls.log"
+
+if [ -n "${STUB_LAUNCHCTL_OUT:-}" ]; then
+  printf '%s\n' "$STUB_LAUNCHCTL_OUT"
+fi
+
+exit "${STUB_LAUNCHCTL_RC:-1}"

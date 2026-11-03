@@ -205,6 +205,113 @@ mirror_state() {
   esac
 }
 
+uc_default() {
+  local v=""
+  v="$(defaults read com.apple.universalcontrol "$1" 2>/dev/null)" || v=""
+  v="$(printf '%s' "$v" | tr -d '\r' | sed -n '1p' | sed 's/[[:space:]]*$//')"
+  if [ -z "$v" ]; then
+    printf 'unset'
+  else
+    printf '%s' "$v"
+  fi
+}
+
+uc_defaults_line() {
+  printf 'GlueIdleTimeout=%s AutomaticallyReconnect=%s' "$(uc_default GlueIdleTimeout)" "$(uc_default AutomaticallyReconnect)"
+}
+
+display_awake_owners() {
+  local out count section owners
+  out="$(pmset -g assertions 2>/dev/null)" || { printf 'unknown'; return 0; }
+  if [ -z "$out" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  count="$(printf '%s\n' "$out" | awk '$1 == "PreventUserIdleDisplaySleep" && $2 ~ /^[0-9]+$/ { print $2; exit }')"
+  case "$count" in
+    ''|*[!0-9]*)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
+  if [ "$count" -eq 0 ]; then
+    printf 'none'
+    return 0
+  fi
+  section="$(printf '%s\n' "$out" | awk '
+    /^Listed by owning process:/ { inside = 1; next }
+    inside && /^[^[:space:]]/ { inside = 0 }
+    inside { print }
+  ')"
+  if [ -z "$section" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  owners="$(printf '%s\n' "$section" | grep -F 'PreventUserIdleDisplaySleep' \
+    | sed -n 's/.*pid [0-9][0-9]*(\([^)]*\)).*/\1/p' | awk '!seen[$0]++' \
+    | paste -sd ',' - | sed 's/,/, /g')"
+  if [ -z "$owners" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s' "$owners"
+}
+
+owner_present() {
+  printf '%s\n' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -qx "$2"
+}
+
+keep_awake_enabled() {
+  local out v=""
+  if [ -n "${VDISP_KEEP_AWAKE:-}" ]; then
+    case "$VDISP_KEEP_AWAKE" in 0) return 1 ;; *) return 0 ;; esac
+  fi
+  out="$(launchctl print "gui/$(id -u)/local.sidecar.vdisp" 2>/dev/null || true)"
+  v="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*VDISP_KEEP_AWAKE => //p' | head -n 1)"
+  if [ -n "$v" ]; then
+    case "$v" in 0) return 1 ;; *) return 0 ;; esac
+  fi
+  v="$(plutil -extract EnvironmentVariables.VDISP_KEEP_AWAKE raw -o - \
+    "$HOME/Library/LaunchAgents/local.sidecar.vdisp.plist" 2>/dev/null || true)"
+  case "$v" in
+    0) return 1 ;;
+    '') return 0 ;;
+    *) return 0 ;;
+  esac
+}
+
+keep_awake_line() {
+  local f line ts epoch now age msg best_ts=0 best_line=""
+  for f in "$LOGS/vdisp.out.log" "$LOGS/vdisp.log"; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      ts="${line%% *}"
+      epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$ts" '+%s' 2>/dev/null)" || epoch=""
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      if [ "$epoch" -gt "$best_ts" ]; then
+        best_ts="$epoch"
+        best_line="$line"
+      fi
+    done <<EOF
+$(grep 'keep-awake' "$f" 2>/dev/null | tail -n 20 || true)
+EOF
+  done
+  if [ "$best_ts" -eq 0 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  now="$(date +%s)"
+  age=$((now - best_ts))
+  if [ "$age" -lt 0 ] || [ "$age" -gt 120 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  msg="${best_line#* }"
+  msg="${msg#keep-awake }"
+  printf '%s (%ss ago)' "$msg" "$age"
+}
+
 read_state_resolution() {
   local v=""
   if [ -f "$RES_FILE" ]; then
@@ -421,6 +528,13 @@ Prints the lid state (open/closed), vdisp, the Sidecar display (id and resolutio
 mirror as reported by bin/dispid (sidecar N -> M) and, when a session is suspended, that
 its display is asleep.
 
+It also prints the factors the tools cannot control: the Universal Control defaults
+(GlueIdleTimeout, AutomaticallyReconnect, or "unset" when a key is absent), who holds
+PreventUserIdleDisplaySleep right now (vdisp and Universal Control each hold their own),
+and the newest keep-awake line from both logs/vdisp.out.log and logs/vdisp.log with its
+age ("unknown" when there is no line or it is older than ~120s). Values that cannot be
+read are reported as unknown, never guessed.
+
 A Sidecar display is "live" when bin/dispid reports active=true or mirror_of != 0. Whether
 Sidecar is connected comes from SidecarDisplayManager.connectedDevices (bin/connected);
 when that probe is unavailable the display list is used and the output says so.
@@ -442,6 +556,8 @@ Read-only consistency check. Compares:
   - vdisp being alive at all (the LaunchAgent's job);
   - with the lid closed, whether the virtual display is main and the live Sidecar mirrors
     it (the arrangement bin/arrange applies);
+  - the UC defaults and the owners of PreventUserIdleDisplaySleep (info only), plus a FAIL
+    when a live session exists, A1 is enabled and vdisp does not hold its assertion;
   - the lid state.
 
 Every problem comes with the action that fixes it. Changes nothing.
@@ -962,6 +1078,10 @@ cmd_status() {
   fi
   printf '%-17s %s\n' 'mirror:' "$mirror"
 
+  printf '%-17s %s\n' 'uc defaults:' "$(uc_defaults_line)"
+  printf '%-17s %s\n' 'display awake:' "$(display_awake_owners)"
+  printf '%-17s %s\n' 'keep-awake:' "$(keep_awake_line)"
+
   log "status: lid=$lid vdisp=${pid:-no} sidecar=$stated display_list=$(if [ -n "$anyl" ]; then printf 1; else printf 0; fi) mirror=$mirror_flag"
 
   if [ "$stated" = connected ]; then
@@ -980,7 +1100,7 @@ check_bad() {
 
 cmd_doctor() {
   local problems=0 lid pids pcount vcount scount probe_out probe_rc probe_state cdev devices
-  local vline live anyl asleep vid sid vmain lmirror
+  local vline live anyl asleep vid sid vmain lmirror owners
 
   need_bin dispid || return 1
 
@@ -1039,6 +1159,9 @@ cmd_doctor() {
   fi
   printf '  %-19s %s\n' 'connected devices:' "$cdev"
   printf '\n'
+
+  owners="$(display_awake_owners)"
+  check_info "uc defaults: $(uc_defaults_line); display awake: $owners"
 
   if [ "$pcount" -eq 0 ]; then
     check_bad "no vdisp process is running ($vcount display(s) with vendor $VENDOR_VDISP still registered)" \
@@ -1101,6 +1224,19 @@ cmd_doctor() {
       check_bad "lid closed but the desktop is not arranged as intended (virtual $(vid) main=$(field "$vline" main), sidecar $sid mirror_of=${lmirror:-unknown})" \
         "run sidecar up, or bin/arrange, to put the virtual display at (0,0) and mirror Sidecar onto it"
     fi
+  fi
+
+  if [ "$probe_state" = "connected" ] && [ -n "$live" ] && keep_awake_enabled; then
+    case "$owners" in
+      unknown|'')
+        ;;
+      *)
+        if ! owner_present "$owners" vdisp; then
+          check_bad "the Sidecar session is live but vdisp does not hold PreventUserIdleDisplaySleep (owners: $owners)" \
+            "read logs/vdisp.log for the keep-awake line and restart the agent (sidecar restart-vdisp, SIGTERM); with VDISP_KEEP_AWAKE=0 the display sleeps with the session"
+        fi
+        ;;
+    esac
   fi
 
   case "$lid" in

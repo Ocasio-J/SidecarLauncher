@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'pmset %s\n' "$*" >>"$dir/calls.log"
+
+if [ "${STUB_PMSET_RC:-0}" != "0" ]; then
+  exit "$STUB_PMSET_RC"
+fi
+
+if [ -n "${STUB_PMSET_OUT:-}" ]; then
+  printf '%s\n' "$STUB_PMSET_OUT"
+fi
+
+exit 0

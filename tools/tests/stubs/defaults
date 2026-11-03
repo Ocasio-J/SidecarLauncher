@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'defaults %s\n' "$*" >>"$dir/calls.log"
+
+if [ "${1:-}" != "read" ]; then
+  exit 1
+fi
+
+case "${3:-}" in
+  GlueIdleTimeout)
+    if [ -n "${STUB_DEFAULTS_GLUE+x}" ]; then
+      printf '%s\n' "$STUB_DEFAULTS_GLUE"
+      exit 0
+    fi
+    exit 1
+    ;;
+  AutomaticallyReconnect)
+    if [ -n "${STUB_DEFAULTS_RECONNECT+x}" ]; then
+      printf '%s\n' "$STUB_DEFAULTS_RECONNECT"
+      exit 0
+    fi
+    exit 1
+    ;;
+esac
+
+exit 1

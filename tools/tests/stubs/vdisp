@@ -3,4 +3,7 @@ set -u
 
 dir="${STUB_DIR:?STUB_DIR is not set}"
 printf 'vdisp %s\n' "$*" >>"$dir/calls.log"
+if [ "${STUB_VDISP_SLEEP:-0}" != "0" ]; then
+  sleep "$STUB_VDISP_SLEEP"
+fi
 exit "${STUB_VDISP_RC:-0}"
