@@ -290,6 +290,45 @@ check "zombie present: exits 1" expect_rc 1
 check "zombie present: one connect" expect_connects 1
 check "zombie present: not connected" expect_no_out "Sidecar connected (id="
 
+CASE "A4: every connect hangs: bounded by CONNECT_TIMEOUT"
+STUB_CONNECTED_RC=1
+STUB_CONNECT_SLEEP=5
+CONNECT_TIMEOUT=1
+CONNECT_ATTEMPTS=2
+TIMEOUT_RETRY_DELAY=0
+run_sidecar up
+check "hung connect: exits 1" expect_rc 1
+check "hung connect: one connect per attempt" expect_connects 2
+check "hung connect: reported as a timeout" expect_out "timed out after 1s"
+
+CASE "A4: exit 3 twice then 0 connects at attempt 3"
+STUB_CONNECT_RC_SEQ="3 3 0"
+CONNECT_ATTEMPTS=3
+run_sidecar up
+check "exit 3 then 0: exits 0" expect_rc 0
+check "exit 3 then 0: three connects" expect_connects 3
+check "exit 3 then 0: reports the connection" expect_out "Sidecar connected"
+
+CASE "A4: a timeout with the probe connected waits instead of reconnecting"
+STUB_CONNECTED_RC=0
+STUB_CONNECT_SLEEP=5
+STUB_CONNECT_SHOWS_DISPLAY_EARLY=1
+CONNECT_TIMEOUT=1
+run_sidecar up
+check "timeout + connected: exits 0" expect_rc 0
+check "timeout + connected: a single connect" expect_connects 1
+check "timeout + connected: reports the connection" expect_out "Sidecar connected"
+
+CASE "A4: a command that dies before the watchdog keeps its real exit code"
+STUB_CONNECTED_RC=1
+STUB_CONNECT_RC=7
+CONNECT_TIMEOUT=2
+run_sidecar up
+check "quick failure: exits 1" expect_rc 1
+check "quick failure: one connect" expect_connects 1
+check "quick failure: not retryable" expect_out "not retryable"
+check "quick failure: not reported as a timeout" expect_no_out "timed out"
+
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
   exit 1

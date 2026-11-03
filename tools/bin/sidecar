@@ -7,14 +7,17 @@ VENDOR_VDISP="0x5644"
 VENDOR_SIDECAR="0x6161706c"
 MODEL_SIDECAR="0x69506164"
 
-POLL_INTERVAL=0.5
-VDISP_TIMEOUT=10
-CONNECT_ATTEMPTS=5
-CONNECT_SETTLE=3
+POLL_INTERVAL="${POLL_INTERVAL:-0.5}"
+VDISP_TIMEOUT="${VDISP_TIMEOUT:-10}"
+CONNECT_ATTEMPTS="${CONNECT_ATTEMPTS:-5}"
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-30}"
+DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-15}"
+CONNECT_SETTLE="${CONNECT_SETTLE:-3}"
 CONNECT_DISPLAY_WAIT="${CONNECT_DISPLAY_WAIT:-25}"
-RETRY_DELAY=5
-DOWN_TIMEOUT=5
-RESTART_TIMEOUT=15
+RETRY_DELAY="${RETRY_DELAY:-5}"
+TIMEOUT_RETRY_DELAY="${TIMEOUT_RETRY_DELAY:-10}"
+DOWN_TIMEOUT="${DOWN_TIMEOUT:-5}"
+RESTART_TIMEOUT="${RESTART_TIMEOUT:-30}"
 
 if [ -n "${SIDECAR_BIN:-}" ]; then
   if [ -d "$SIDECAR_BIN" ]; then
@@ -96,6 +99,10 @@ classify_connect() {
     *"No sidecar capable devices"*) printf 'retry'; return 0 ;;
   esac
   if [ "$rc" -eq 2 ]; then
+    printf 'retry'
+    return 0
+  fi
+  if [ "$rc" -eq 3 ]; then
     printf 'retry'
     return 0
   fi
@@ -248,11 +255,36 @@ apply_saved_resolution() {
   return 0
 }
 
+run_with_timeout() {
+  local secs="$1" out flag pid watchdog rc=0
+  shift
+  out="$(mktemp "${TMPDIR:-/tmp}/sidecar.out.XXXXXX")" || return 1
+  flag="$(mktemp "${TMPDIR:-/tmp}/sidecar.flag.XXXXXX")" || { rm -f "$out"; return 1; }
+  rm -f "$flag"
+
+  ( exec "$@" ) >"$out" 2>&1 &
+  pid=$!
+  ( sleep "$secs"; if kill -TERM "$pid" 2>/dev/null; then : >"$flag"; fi ) &
+  watchdog=$!
+
+  wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+
+  if [ -f "$flag" ]; then
+    rc=124
+  fi
+
+  RUN_OUT="$(cat "$out" 2>/dev/null || true)"
+  rm -f "$out" "$flag"
+  return "$rc"
+}
+
 disconnect_quiet() {
-  local out="" rc=0
-  out="$("$BIN/SidecarLauncher" disconnect "$NAME" 2>&1)" || rc=$?
+  local rc=0
+  run_with_timeout "$DISCONNECT_TIMEOUT" "$BIN/SidecarLauncher" disconnect "$NAME" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    log "disconnect \"$NAME\" exit $rc (ignored): $(printf '%s' "$out" | tr '\n' ' ')"
+    log "disconnect \"$NAME\" exit $rc (ignored): $(printf '%s' "${RUN_OUT:-}" | tr '\n' ' ')"
   fi
   return 0
 }
@@ -271,6 +303,9 @@ usage: sidecar <command>
 
 variables:
   NAME      name of the Sidecar device (default: iPad)
+  timing    CONNECT_TIMEOUT=30 CONNECT_ATTEMPTS=5 CONNECT_SETTLE=3 CONNECT_DISPLAY_WAIT=25
+            DISCONNECT_TIMEOUT=15 RETRY_DELAY=5 TIMEOUT_RETRY_DELAY=10 VDISP_TIMEOUT=10
+            DOWN_TIMEOUT=5 RESTART_TIMEOUT=30 (all overridable, for the offline tests)
 
 files:
   log       $LOG
@@ -324,7 +359,9 @@ Without state/resolution there is a single connect and no second pass.
 
 Retried (transient, verified): -455 SidecarErrorDisplayAWDLDegraded,
 -101 SidecarErrorServiceDisconnected, -203 SidecarErrorDeviceWiFiNotEnabled,
-exit 2 / "No sidecar capable devices detected".
+exit 2 / "No sidecar capable devices detected", exit 3 ("not in the list of available
+devices") and a connect that times out after CONNECT_TIMEOUT (it probes first: if the
+session already reports connected it waits for the display instead of reconnecting).
 Aborted immediately (no retry): -501 SidecarErrorVirtualDisplayFailed and every other
 error, because retrying a corrupted display configuration only adds orphan displays.
 
@@ -478,9 +515,29 @@ connect_with_retries() {
     info "connect \"$NAME\" (attempt $attempt/$CONNECT_ATTEMPTS)"
     rc=0
     last_out=""
-    out="$("$BIN/SidecarLauncher" connect "$NAME" 2>&1)" || rc=$?
+    run_with_timeout "$CONNECT_TIMEOUT" "$BIN/SidecarLauncher" connect "$NAME" || rc=$?
+    out="$RUN_OUT"
     out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
     log "connect \"$NAME\" exit $rc: ${out:-no output}"
+
+    if [ "$rc" -eq 124 ]; then
+      last_out="$out"
+      last_rc="$rc"
+      if [ "$(sidecar_probe_state)" = "connected" ]; then
+        info "connect timed out after ${CONNECT_TIMEOUT}s but the session reports connected: waiting for the display"
+        if live="$(wait_for_live_display "$CONNECT_DISPLAY_WAIT")"; then
+          info "Sidecar connected (id=$(field "$live" id), $(resolution "$live"))"
+          return 0
+        fi
+        fail "connect timed out after ${CONNECT_TIMEOUT}s and no live Sidecar display appeared (run sidecar doctor)"
+        return 1
+      fi
+      warn "connect timed out after ${CONNECT_TIMEOUT}s (attempt $attempt), retrying"
+      if [ "$attempt" -lt "$CONNECT_ATTEMPTS" ]; then
+        sleep "$TIMEOUT_RETRY_DELAY"
+      fi
+      continue
+    fi
 
     if [ "$rc" -eq 0 ]; then
       sleep "$CONNECT_SETTLE"
@@ -531,6 +588,11 @@ displays, then retry. Do not SIGKILL vdisp: it leaves orphan displays."
       sleep "$RETRY_DELAY"
     fi
   done
+
+  if [ "$last_rc" -eq 124 ]; then
+    fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts: every attempt timed out after ${CONNECT_TIMEOUT}s"
+    return 1
+  fi
 
   if [ -n "$last_out" ] && printf '%s' "$last_out" | grep -qE -- '-455|SidecarErrorDisplayAWDLDegraded'; then
     fail "Sidecar not connected after $CONNECT_ATTEMPTS attempts
