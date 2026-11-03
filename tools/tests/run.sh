@@ -74,7 +74,7 @@ export_stubs() {
 
 run_sidecar() {
   export_stubs
-  OUT="$(SIDECAR_BIN="$BIN" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
+  OUT="$(PATH="$BIN:$PATH" SIDECAR_BIN="$BIN" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
   RC=$?
 }
 
@@ -82,7 +82,7 @@ run_sidecar_with_bin() {
   local bin="$1"
   shift
   export_stubs
-  OUT="$(SIDECAR_BIN="$bin" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
+  OUT="$(PATH="$bin:$PATH" SIDECAR_BIN="$bin" STUB_DIR="$STUB_DIR" "$SIDECAR" "$@" 2>&1)"
   RC=$?
 }
 
@@ -107,14 +107,14 @@ check() {
 
 connects() { grep -c '^connect ' "$STUB_DIR/calls.log" 2>/dev/null || true; }
 disconnects() { grep -c '^disconnect ' "$STUB_DIR/calls.log" 2>/dev/null || true; }
-probes() { grep -c '^connected ' "$STUB_DIR/calls.log" 2>/dev/null || true; }
+caffeinates() { grep -c '^caffeinate ' "$STUB_DIR/calls.log" 2>/dev/null || true; }
 
 expect_rc() { [ "$RC" -eq "$1" ]; }
 expect_out() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
 expect_no_out() { ! printf '%s\n' "$OUT" | grep -qF -- "$1"; }
 expect_connects() { [ "$(connects)" -eq "$1" ]; }
 expect_disconnects() { [ "$(disconnects)" -eq "$1" ]; }
-expect_probes() { [ "$(probes)" -eq "$1" ]; }
+expect_caffeinates() { [ "$(caffeinates)" -eq "$1" ]; }
 expect_call() { grep -q "^$1" "$STUB_DIR/calls.log"; }
 expect_no_call() { ! grep -q "^$1" "$STUB_DIR/calls.log"; }
 expect_log() { printf '%s\n' "$1" | grep -qF -- "$2"; }
@@ -234,7 +234,7 @@ check "up --force: not reported as healthy" expect_no_out "session healthy"
 
 CASE "up: probe disconnected with a live display reconnects"
 STUB_CONNECTED_RC=1
-STUB_SIDECAR_FOR_CALLS=2
+STUB_SIDECAR_FOR_CALLS=3
 run_sidecar up
 check "up disconnected: exits 0" expect_rc 0
 check "up disconnected: reconnects" expect_connects 1
@@ -284,7 +284,9 @@ check "unknown but not live: says the state is unknown" expect_out "session stat
 CASE "A3: a zombie display is never a success"
 STUB_CONNECTED_RC=0
 STUB_CONNECT_LEAVES_DISPLAY=0
-STUB_ZOMBIE=1
+STUB_SIDECAR_MIRROR_OF=0
+STUB_SIDECAR_ACTIVE=false
+STUB_SIDECAR_FOR_CALLS=3
 run_sidecar up
 check "zombie present: exits 1" expect_rc 1
 check "zombie present: one connect" expect_connects 1
@@ -328,6 +330,63 @@ check "quick failure: exits 1" expect_rc 1
 check "quick failure: one connect" expect_connects 1
 check "quick failure: not retryable" expect_out "not retryable"
 check "quick failure: not reported as a timeout" expect_no_out "timed out"
+
+CASE "A5: wake brings a suspended session back: no reconnect"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_ALWAYS=1
+STUB_WAKE_RECONNECTS=1
+run_sidecar up
+check "wake healthy: exits 0" expect_rc 0
+check "wake healthy: no connect" expect_connects 0
+check "wake healthy: no disconnect" expect_disconnects 0
+check "wake healthy: one caffeinate" expect_caffeinates 1
+check "wake healthy: reports the session healthy" expect_out "session healthy"
+
+CASE "A5: wake failure does not change the flow"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_ALWAYS=1
+STUB_WAKE_RECONNECTS=1
+STUB_CAFFEINATE_RC=1
+run_sidecar up
+check "wake failure: exits 0" expect_rc 0
+check "wake failure: still no connect" expect_connects 0
+check "wake failure: reports the session healthy" expect_out "session healthy"
+
+CASE "A5: a display that survives the wake and the disconnect aborts with 0 connects"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_ALWAYS=1
+run_sidecar up
+check "surviving display: exits 1" expect_rc 1
+check "surviving display: no connect (-501 avoided)" expect_connects 0
+check "surviving display: one disconnect attempt" expect_disconnects 1
+check "surviving display: names the abort" expect_out "wake and disconnect did not release the Sidecar display"
+check "surviving display: points at sidecar down" expect_out "sidecar down"
+check "surviving display: never SIGKILL/kickstart/bootout" expect_out "Never SIGKILL vdisp, kickstart -k or bootout"
+check "surviving display: never reported healthy" expect_no_out "session healthy"
+
+CASE "A5: --force skips the wake recovery but still caffeinates once"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_ALWAYS=1
+run_sidecar up --force
+check "force with residual: exits 0" expect_rc 0
+check "force with residual: one caffeinate" expect_caffeinates 1
+check "force with residual: one disconnect" expect_disconnects 1
+check "force with residual: one connect" expect_connects 1
+
+CASE "A5: no prior evidence goes straight to connect without caffeinate"
+STUB_CONNECTED_RC=1
+run_sidecar up
+check "no evidence: exits 0" expect_rc 0
+check "no evidence: one connect" expect_connects 1
+check "no evidence: no caffeinate" expect_caffeinates 0
+
+CASE "A5: a residual that clears on its own continues to connect"
+STUB_CONNECTED_RC=1
+STUB_SIDECAR_FOR_CALLS=3
+run_sidecar up
+check "residual cleared: exits 0" expect_rc 0
+check "residual cleared: one caffeinate" expect_caffeinates 1
+check "residual cleared: one connect" expect_connects 1
 
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then

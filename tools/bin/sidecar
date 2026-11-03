@@ -14,6 +14,7 @@ CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-30}"
 DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-15}"
 CONNECT_SETTLE="${CONNECT_SETTLE:-3}"
 CONNECT_DISPLAY_WAIT="${CONNECT_DISPLAY_WAIT:-25}"
+WAKE_SETTLE="${WAKE_SETTLE:-10}"
 RETRY_DELAY="${RETRY_DELAY:-5}"
 TIMEOUT_RETRY_DELAY="${TIMEOUT_RETRY_DELAY:-10}"
 DOWN_TIMEOUT="${DOWN_TIMEOUT:-5}"
@@ -294,7 +295,7 @@ usage() {
 usage: sidecar <command>
 
   ensure    make sure the virtual display ($VENDOR_VDISP) is up
-  up        ensure + connect to "$NAME" + saved resolution + arrange + mirror
+  up        ensure + (reconnect when not healthy; --force always) + arrange + mirror
   down      disconnect from "$NAME" (idempotent)
   status    lid, vdisp, Sidecar and mirror state (read-only)
   doctor    consistency check of displays, vdisp and Sidecar (read-only)
@@ -304,8 +305,9 @@ usage: sidecar <command>
 variables:
   NAME      name of the Sidecar device (default: iPad)
   timing    CONNECT_TIMEOUT=30 CONNECT_ATTEMPTS=5 CONNECT_SETTLE=3 CONNECT_DISPLAY_WAIT=25
-            DISCONNECT_TIMEOUT=15 RETRY_DELAY=5 TIMEOUT_RETRY_DELAY=10 VDISP_TIMEOUT=10
-            DOWN_TIMEOUT=5 RESTART_TIMEOUT=30 (all overridable, for the offline tests)
+            WAKE_SETTLE=10 DISCONNECT_TIMEOUT=15 RETRY_DELAY=5 TIMEOUT_RETRY_DELAY=10
+            VDISP_TIMEOUT=10 DOWN_TIMEOUT=5 RESTART_TIMEOUT=30 (all overridable, for the
+            offline tests)
 
 files:
   log       $LOG
@@ -333,27 +335,34 @@ usage: sidecar up [--force] [--help]
    connected (or unavailable), run the layout step and return 0 without reconnecting:
    state/resolution is not reapplied on a healthy session. A healthy session is a
    no-op apart from arranging the desktop, which is idempotent
-3. otherwise reconnect to "$NAME": disconnect first to clear zombie sessions (errors
-   ignored), then pass 1
-4. if state/resolution exists, compare it with the mode macOS negotiated in pass 1
-5. only when they differ: setmode to the saved mode, then pass 2 (disconnect and connect
+3. otherwise, when a Sidecar display is still listed or the probe says connected, wake
+   the displays (caffeinate -u -t 2) and wait up to WAKE_SETTLE for Sidecar to come back
+   by itself: a session that returns live is healthy and is not reconnected. If a
+   suspended session's display survives the wake, disconnect it and wait for it to clear
+   before connecting; if it does not clear, abort with the lid-cycle instruction instead
+   of spending a connect on -501
+4. reconnect to "$NAME": disconnect first to clear zombie sessions (errors ignored),
+   then pass 1
+5. if state/resolution exists, compare it with the mode macOS negotiated in pass 1
+6. only when they differ: setmode to the saved mode, then pass 2 (disconnect and connect
    again) so the new session inherits it. macOS remembers the mode per display, but a
    change made on a live session is only reliably applied at the next connection. Every
    connect creates a new Sidecar display id and Universal Control on other devices
    accumulates duplicate tiles, so there is no reconnect when nothing changes
-6. verify the current mode against state/resolution; a mismatch is a warning, not a
+7. verify the current mode against state/resolution; a mismatch is a warning, not a
    failure (run up again, or reconnect the iPad by hand)
-7. with the lid closed, arrange the displays so that the virtual display is main at
+8. with the lid closed, arrange the displays so that the virtual display is main at
    (0,0) and Sidecar mirrors it (bin/arrange). Measured on a closed lid: Universal
    Control holds ~4 minutes this way, ~1 minute with Sidecar as main. The mirrored
    desktop is as big as the virtual display, which is why its size comes from the
    LaunchAgent environment (1321x918) rather than the 640x480 default
-8. mirror the Sidecar display onto the built-in one, when a built-in exists
+9. mirror the Sidecar display onto the built-in one, when a built-in exists
    (with the lid closed the mirror and the arrangement are skipped and the command
    still succeeds)
 
---force skips the healthy-session no-op and performs the full reconnect path, so the
-saved mode is reapplied even on an otherwise-healthy session.
+--force skips the healthy-session no-op and the wake/abort recovery (it still sends a
+bare caffeinate -u -t 2 before the forced disconnect) and performs the full reconnect
+path, so the saved mode is reapplied even on an otherwise-healthy session.
 
 Without state/resolution there is a single connect and no second pass.
 
@@ -622,8 +631,77 @@ layout_step() {
   fi
 }
 
+a5_recover() {
+  local probe live anyl i cleared=0 wait_display=0
+
+  info "waking the displays and waiting for the Sidecar session"
+  caffeinate -u -t 2 >/dev/null 2>&1 || true
+
+  for i in $(seq 1 $((WAKE_SETTLE * 2))); do
+    live="$(live_sidecar_line)"
+    anyl="$(any_sidecar_line)"
+    probe="$(sidecar_probe_state)"
+
+    if [ -n "$live" ] && { [ "$probe" = "connected" ] || [ "$probe" = "unknown" ]; }; then
+      info "session healthy (id=$(field "$live" id)): no reconnect after wake"
+      return 0
+    fi
+    if [ -z "$anyl" ] && [ "$probe" = "disconnected" ]; then
+      info "no Sidecar display left after the wake: connecting"
+      return 1
+    fi
+    if [ -z "$anyl" ] && [ "$probe" = "connected" ]; then
+      wait_display=1
+      break
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+
+  live="$(live_sidecar_line)"
+  probe="$(sidecar_probe_state)"
+  if [ -n "$live" ] && { [ "$probe" = "connected" ] || [ "$probe" = "unknown" ]; }; then
+    info "session healthy (id=$(field "$live" id)): no reconnect after wake"
+    return 0
+  fi
+
+  anyl="$(any_sidecar_line)"
+  if [ "$wait_display" -eq 1 ] || { [ -z "$anyl" ] && [ "$probe" = "connected" ]; }; then
+    if live="$(wait_for_live_display "$CONNECT_DISPLAY_WAIT")"; then
+      info "session healthy (id=$(field "$live" id)): no reconnect after wake"
+      return 0
+    fi
+    info "the session is present but its display did not appear: reconnecting"
+    return 1
+  fi
+
+  if [ -n "$anyl" ]; then
+    info "the Sidecar display (id=$(field "$anyl" id)) survived the wake: disconnecting the suspended session"
+    disconnect_quiet
+    A5_DISCONNECTED=1
+    sleep 1
+    for i in $(seq 1 $((WAKE_SETTLE * 2))); do
+      if [ -z "$(any_sidecar_line)" ]; then
+        cleared=1
+        break
+      fi
+      sleep "$POLL_INTERVAL"
+    done
+    if [ "$cleared" -eq 1 ]; then
+      info "the Sidecar display is gone: connecting"
+      return 1
+    fi
+    fail "wake and disconnect did not release the Sidecar display (id $(field "$anyl" id)).
+\`sidecar down\` cannot remove it: open and close the lid once to force the WindowServer
+to re-enumerate displays. Never SIGKILL vdisp, kickstart -k or bootout: they leave the
+display behind."
+    return 2
+  fi
+
+  return 1
+}
+
 cmd_up() {
-  local force="${UP_FORCE:-0}" target current probe live
+  local force="${UP_FORCE:-0}" target current probe live anyl a5_rc
 
   need_bin vdisp dispid SidecarLauncher mirror setmode arrange || return 1
 
@@ -631,6 +709,7 @@ cmd_up() {
 
   probe="$(sidecar_probe_state)"
   live="$(live_sidecar_line)"
+  anyl="$(any_sidecar_line)"
 
   if [ "$force" -eq 0 ] && [ -n "$live" ] && { [ "$probe" = "connected" ] || [ "$probe" = "unknown" ]; }; then
     if [ "$probe" = "connected" ]; then
@@ -642,9 +721,26 @@ cmd_up() {
     return 0
   fi
 
-  info "clearing previous sessions for \"$NAME\""
-  disconnect_quiet
-  sleep 1
+  A5_DISCONNECTED=0
+  if [ "$force" -eq 1 ]; then
+    info "waking the displays before the forced reconnect"
+    caffeinate -u -t 2 >/dev/null 2>&1 || true
+  elif [ -n "$anyl" ] || [ "$probe" = "connected" ]; then
+    a5_rc=0
+    a5_recover || a5_rc=$?
+    case "$a5_rc" in
+      0) layout_step; return 0 ;;
+      2) return 1 ;;
+    esac
+  fi
+
+  if [ "$A5_DISCONNECTED" -eq 0 ]; then
+    info "clearing previous sessions for \"$NAME\""
+    disconnect_quiet
+    sleep 1
+  else
+    info "the previous session is already disconnected: not disconnecting again"
+  fi
 
   info "pass 1: negotiate with \"$NAME\""
   connect_with_retries || return 1
