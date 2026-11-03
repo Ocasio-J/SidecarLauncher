@@ -9,7 +9,10 @@ in-place overwrites before these files were tracked.
 |---|---|---|
 | `analysis.md` | why Universal Control dropped: log evidence, replies, addendum. Written by an independent analysis agent, annotated by the tool agent | reference |
 | `plan.md` | first implementation plan for `tools/` (items A1–A4, B1–B7, C1) | superseded by `design-v3.md` |
-| `design-v3.md` | design after two adversarial reviews. v1 and v2 are **lost** (untracked, overwritten); their content survives only in the "Resolution" sections of v3 | awaiting third verdict |
+| `design-v3.md` | design after two adversarial reviews. v1 and v2 are **lost** (untracked, overwritten); their content survives only in the "Resolution" sections of v3 | superseded by v6 |
+| `design-v4.md` | v3 + the 12:12 event delta (A5, A6) | rejected (2 new blockers, both from A5) |
+| `design-v5.md` | v4 + those two fixes, with A5 restructured | rejected (2 new blockers) |
+| `design-v6.md` | **approved by both architects**. Coder may start phase 1 (commits 1–6); phase 2 (A1+B6) authorised at the end of phase 1 | **current** |
 
 ## Cycle state
 
@@ -19,8 +22,16 @@ in-place overwrites before these files were tracked.
 4. **review 2** (adversarial): `RESPINGO`, 3 new blocking objections — `disprule.swift` cannot be
    compiled alongside top-level helper sources; `live_sidecar_line` with a fallback is not "live";
    `A2` falls back to reconnecting when the probe returns `unknown`.
-5. **design v3**: 3/3 accepted, plus 9 annotations. *(this archive)*
-6. **review 3** — pending.
+5. **design v3**: 3/3 accepted, plus 9 annotations.
+6. **review 3** (adversarial): `RESPINGO`, 2 blocking objections introduced by A5 and by
+   A1's acceptance.
+7. **design v4**: 12:12 event delta (A5, A6), A1 outcome test made mandatory. *(rejected)*
+8. **review 4**: `RESPINGO`, 2 new blocking objections from the A5 restructuring.
+9. **design v5**: A5 reachable branches, measurable A1 criterion. *(rejected)*
+10. **review 5**: `RESPINGO`, 2 new blocking objections (`live` without probe; three
+    incompatible statements about `state/resolution`).
+11. **design v6**: both fixed.
+12. **review 6**: **`APPROVO`**, phase 1 authorised, phase 2 authorised at the end of phase 1.
 
 ## Rules for the next revision
 
