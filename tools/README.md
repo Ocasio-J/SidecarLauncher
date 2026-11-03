@@ -2,21 +2,24 @@
 
 ## Rules that keep this working
 
-> **Never `SIGKILL` `vdisp`, and do not restart it with `launchctl kickstart -k` or
-> `launchctl bootout`.** Both leave the display behind as an orphan in the WindowServer.
-> Use `kill -TERM <pid>` (or `sidecar restart-vdisp`): the process releases its display
-> on the way out, and `KeepAlive` starts it again with a fresh identity.
+> **`SIGTERM` is safe; `SIGKILL` is not.** `bin/vdisp` installs a `SIGTERM`/`SIGINT`
+> handler that releases the display before exiting, so `kill -TERM <pid>`,
+> `sidecar restart-vdisp` and `launchctl bootout` (launchd stops the job with `SIGTERM`)
+> leave no orphan behind. `install.sh` boots the agent out on every run for this reason.
 >
-> `SIGTERM` releases the display; `SIGKILL`, `kickstart -k` and `bootout` do not.
+> `SIGKILL` and `launchctl kickstart -k` (which sends `SIGKILL`) bypass the handler: the
+> process dies without releasing anything, and its display stays in the WindowServer with
+> no owner. Do not use them.
 
 Once a display is orphaned, no process owns it any more: only a WindowServer
-re-enumeration (**open and close the lid once**) removes it. `kill`, `bootout` and
-`CGConfigureDisplayEnabled` cannot. See [Troubleshooting](#troubleshooting).
+re-enumeration (**open and close the lid once**) removes it. At that point `kill` and
+`bootout` have nothing left to release, and `CGConfigureDisplayEnabled` cannot help
+either. See [Troubleshooting](#troubleshooting).
 
 ## What it does
 
 ```
-sidecar up             → virtual display + connect + saved resolution + arrange + mirror
+sidecar up             → virtual display + reconnect only when not healthy + arrange + mirror
 sidecar down           → disconnect "iPad"
 sidecar status         → what is actually happening (read-only)
 sidecar doctor         → consistency check with the fix for every problem (read-only)
@@ -62,12 +65,15 @@ connect, so it already sits at `(0,0)` and is the **main** display; the Sidecar 
 then arrives as a second screen to its right. Left alone, the iPad shows an empty extended
 desktop, which looks exactly like "the resolution is wrong".
 
-`bin/arrange` turns that into the arrangement that survives longest on a closed lid: the
-**virtual display stays main at `(0,0)`**, every other display is chained to its right,
-and the **Sidecar mirrors the virtual display**. Measured over six minutes of log with no
-other variables: Universal Control held about **1 minute** with Sidecar as main, and about
-**4 minutes** with the virtual display as main and Sidecar mirroring it, recovering by
-itself in ~10 s. It still drops — this makes it last longer, it does not fix it.
+`bin/arrange` turns that into the arrangement used on a closed lid: the **virtual display
+stays main at `(0,0)`**, every other display is chained to its right, and the **Sidecar
+mirrors the virtual display**. A minute-scale comparison between this arrangement and the
+other one used to be quoted here; it is withdrawn because it came from a six-minute window
+with other variables in it and cannot be attributed to the arrangement. What is measured
+and attributable is A1: with `vdisp` holding its own assertion, a live Sidecar session kept
+the display awake for **26 minutes** with no `Display Sleep: Disconnecting` in the log. The
+arrangement does not stop Universal Control from dropping for other reasons — see
+[`docs/uc-hardening/analysis.md`](../docs/uc-hardening/analysis.md).
 
 A mirrored display cannot be configured, so `arrange` works in phases, each with its own
 `CGBeginDisplayConfiguration`/commit and its return codes on stdout:
@@ -148,9 +154,12 @@ under `EnvironmentVariables`, 1321x918). Because `install.sh` re-renders the pli
 time, that is the only place those values survive — see
 [The size of the mirrored desktop](#the-size-of-the-mirrored-desktop).
 
-Because `install.sh` boots the agent out, and `bootout` does not release a running
-display, run `./bin/sidecar doctor` afterwards: if it reports a zombie `0x5644` display,
-open and close the lid once. Re-run `install.sh` after moving the folder or rebuilding.
+Because `vdisp` releases its display in the `SIGTERM` handler, `install.sh`'s `bootout`
+is a clean stop: it waits up to 10 s for the old pid to leave, then bootstraps the agent
+again so the new process creates a fresh display. Run `./bin/sidecar doctor` afterwards to
+confirm there is exactly one `0x5644` display for the new pid; a zombie that survives here
+comes from an older build or a hard kill, and only the lid cycle removes it. Re-run
+`install.sh` after moving the folder or rebuilding.
 
 The agent keeps the display alive: `RunAtLoad` starts it at login, `KeepAlive` restarts it
 if it dies. Both matter — if `vdisp` disappears, the Sidecar session dies at the next lid
@@ -165,6 +174,9 @@ To remove it:
 launchctl bootout gui/$(id -u)/local.sidecar.vdisp
 ```
 
+`bootout` stops the job with `SIGTERM`, so the display is released with the process: this is
+the clean way to remove it.
+
 Without the agent, `sidecar ensure` (and therefore `up`) starts `vdisp` in the background
 itself, logging to `logs/vdisp.log`; it survives the shell, not a reboot.
 
@@ -172,9 +184,10 @@ itself, logging to `logs/vdisp.log`; it survives the shell, not a reboot.
 
 ```
 sidecar ensure      # start vdisp if needed, wait up to 10 s for vendor 0x5644
-sidecar up          # ensure, disconnect, connect, [setmode, reconnect], arrange/mirror
+sidecar up          # ensure; reconnect only when unhealthy (--force: always); arrange/mirror
 sidecar down        # disconnect, wait up to 5 s for the Sidecar display to go away
-sidecar status      # lid, vdisp, Sidecar display (id, resolution), mirror
+sidecar status      # lid, vdisp, Sidecar display (id, resolution), mirror, UC defaults,
+                    # who holds the display awake, newest keep-awake line
 sidecar doctor      # every check, every problem with its fix
 sidecar restart-vdisp
 sidecar res         # current mode of the Sidecar display + available HiDPI modes
@@ -191,20 +204,39 @@ NAME="Roberto's iPad" sidecar up
 What `up` really does:
 
 1. `ensure` — if `pgrep` finds no `vdisp`, it starts one and polls `dispid` every 0.5 s
-   until vendor `0x5644` appears (10 s budget).
-2. `disconnect "iPad"`, errors ignored: it clears zombie sessions that hold the iPad.
-3. **pass 1** — `connect`, retried or aborted as in the table below. An attempt counts as
-   successful only with exit 0 **and** vendor `0x6161706c` in `dispid` 3 s later.
-4. if `state/resolution` exists: `setmode` to that mode.
-5. **pass 2** — `disconnect` and `connect` again, so the new session starts with that
-   mode. macOS remembers the mode per display, but a change made on a live session is
-   only reliably applied at the next connection.
-6. verify the current mode against `state/resolution`; a mismatch is a **warning**, not a
+   until vendor `0x5644` appears (`VDISP_TIMEOUT`, 10 s).
+2. **gate** — a live Sidecar display (`active=true` **or** `mirror_of≠0` in `dispid`) with
+   the probe reporting `connected` **or** `unknown` is a healthy session: `up` runs the
+   layout step and exits 0 **without** disconnecting, connecting or touching
+   `state/resolution`, so a second `up` costs zero resets. When the probe is unavailable it
+   warns and assumes the live display is the session.
+3. **A5, only when the session is not healthy but something is still there** (a display
+   listed, or the probe reporting `connected`): wake the display with
+   `caffeinate -u -t 2`, then wait up to `WAKE_SETTLE` for Sidecar to come back by itself.
+   A session that returns live is healthy and is not reconnected — this is what turns a
+   session waiting for the display to wake into a recovery instead of a `-501`. A suspended
+   display that survives the wake is disconnected and given `WAKE_SETTLE` to clear; if it
+   does not clear, `up` aborts with the lid-cycle instruction instead of spending a connect
+   on `-501`.
+4. `disconnect "$NAME"`, errors ignored: it clears zombie sessions that hold the iPad
+   (skipped when A5 already disconnected).
+5. **pass 1** — `connect`, retried or aborted as in the table below. An attempt counts as
+   successful only with exit 0 **and** vendor `0x6161706c` in `dispid` `CONNECT_SETTLE`
+   (3 s) later.
+6. if `state/resolution` exists, compare it with the mode macOS negotiated in pass 1.
+7. only when they differ: `setmode` to the saved mode, then **pass 2** (`disconnect` and
+   `connect` again) so the new session starts with it. macOS remembers the mode per
+   display, but a change made on a live session is only reliably applied at the next
+   connection. Every connect creates a new Sidecar display id and Universal Control on the
+   other Macs keeps a tile per id, so nothing is reconnected when nothing changes.
+8. verify the current mode against `state/resolution`; a mismatch is a **warning**, not a
    failure.
-7. with the lid closed: `arrange`, so the virtual display is main at `(0,0)`, the others
-   sit to its right and Sidecar mirrors the virtual display.
-8. with a built-in display: `mirror` onto it.
+9. with the lid closed: `arrange`, so the virtual display is main at `(0,0)`, the others sit
+   to its right and Sidecar mirrors the virtual display.
+10. with a built-in display: `mirror` onto it.
 
+`--force` skips the gate and A5: after a bare `caffeinate -u -t 2` (no waits, no abort) it
+runs the full reconnect path, so the saved mode is reapplied even on a healthy session.
 Without `state/resolution` there is a single connect and no second pass.
 
 | outcome of `connect` | behaviour |
@@ -215,6 +247,8 @@ Without `state/resolution` there is a single connect and no second pass.
 | `-101 SidecarErrorServiceDisconnected` | retry (transient, verified) |
 | `-203 SidecarErrorDeviceWiFiNotEnabled` | retry (iPad asleep: it wakes and passes) |
 | exit 2 / `No sidecar capable devices detected` | retry (iPad not announced yet) |
+| exit 3 / not in the list of available devices | retry (device not announced yet) |
+| no exit after `CONNECT_TIMEOUT` | retry after `TIMEOUT_RETRY_DELAY`; first it probes: a session that reports `connected` just waits for the display instead of reconnecting |
 | `-501 SidecarErrorVirtualDisplayFailed` | **abort**, with the lid-cycle message |
 | anything else | **abort** |
 
@@ -223,6 +257,30 @@ gave five zombies.
 
 Exit codes: `0` success, `1` failure (`status`: `1` = not connected). Every message is
 logged with an ISO timestamp to `logs/sidecar.log`; stdout stays to one line per step.
+
+### Variables and timeouts
+
+Everything is an environment variable with a default; there is no configuration file.
+
+| variable | default | what it bounds |
+|---|---|---|
+| `NAME` | `iPad` | the Sidecar device `connect`/`disconnect` address |
+| `SIDECAR_BIN` | unset | **test-only**: a directory the helpers are resolved from instead of `bin/`; unset keeps the normal layout, a non-directory fails loudly with no fallback |
+| `VDISP_KEEP_AWAKE` | `1` | read from the LaunchAgent (or the environment): `1` makes `vdisp` hold `PreventUserIdleDisplaySleep` while a session is live (A1), `0` disables it so the display sleeps with the session |
+| `KEEP_AWAKE_MAX_HOLD` | `0` | optional ceiling in seconds on how long `vdisp` keeps that assertion; `0` means no ceiling |
+| `CONNECT_TIMEOUT` | `30 s` | one `connect`; hitting it is retried |
+| `CONNECT_ATTEMPTS` | `5` | connect attempts per pass |
+| `CONNECT_SETTLE` | `3 s` | how long after `connect` exit 0 the display is given to appear (success needs both) |
+| `CONNECT_DISPLAY_WAIT` | `25 s` | how long A5 waits for the display on a session that already reports `connected` |
+| `WAKE_SETTLE` | `10 s` | how long A5 waits for the session to come back after `caffeinate -u -t 2`, and for a disconnected display to clear |
+| `DISCONNECT_TIMEOUT` | `15 s` | one `disconnect` |
+| `RETRY_DELAY` | `5 s` | pause between ordinary retries |
+| `TIMEOUT_RETRY_DELAY` | `10 s` | pause after a `connect` that hit `CONNECT_TIMEOUT` |
+| `VDISP_TIMEOUT` | `10 s` | `ensure` waiting for vendor `0x5644` to appear |
+| `DOWN_TIMEOUT` | `5 s` | `down` waiting for the Sidecar display to disappear |
+| `RESTART_TIMEOUT` | `30 s` | `restart-vdisp` waiting for the old display to go and a new one to appear |
+
+`POLL_INTERVAL` (0.5 s) is the polling step used everywhere.
 
 ### Resolution
 
@@ -243,12 +301,17 @@ committed. Both forms **require a connected Sidecar display**.
 pixels on a 2× display); delete the file to stop `up` from touching the mode. `setmode`
 prefers the HiDPI variant when more than one mode matches.
 
+When the Sidecar display mirrors another display, both forms print a note naming the
+display the iPad actually shows — the virtual one: the mode of the Sidecar display is then
+not what the iPad renders, and the mirrored desktop is sized by `VDISP_WIDTH`/`VDISP_HEIGHT`
+(1321x918 in the template), not by `res`.
+
 This is the *Sidecar* mode. The size of the mirrored desktop is a different knob: it is
 the resolution of the **virtual** display, set in the LaunchAgent template — see
 [The size of the mirrored desktop](#the-size-of-the-mirrored-desktop).
 
-`up` closes the loop itself, but only when there is something to close. After the first
-connect it compares the mode macOS negotiated with the saved one:
+`up` closes the loop itself, and only when it reconnects. After the first connect it
+compares the mode macOS negotiated with the saved one:
 
 - **equal** — nothing to inherit: `mode 1321x918 already negotiated by macOS: no reconnect
   needed`, one connect only;
@@ -258,6 +321,10 @@ connect it compares the mode macOS negotiated with the saved one:
 The second pass is deliberately conditional: every `connect` creates a new Sidecar display
 id, and Universal Control on the other Macs keeps a tile per id, so reconnecting for
 nothing litters the screen with duplicates.
+
+A healthy session never reaches this code: the gate returns before the disconnect, so
+`state/resolution` is **not** reapplied by an idempotent `up`. It is reapplied when `up`
+actually reconnects, or with `sidecar up --force`.
 
 **`res` on its own does not reconnect**: it applies and saves, but the picture on the iPad
 updates reliably only at the next connection. After a bare `sidecar res 1165x809`, run
@@ -275,18 +342,19 @@ in the WindowServer after the process that created it was killed hard. Sidecar r
 create its own virtual display while the configuration is in that state.
 
 **Cure.** Open and close the lid once. The WindowServer re-enumerates the displays and the
-orphans disappear. Then `sidecar up` again. `up` refuses to start while an orphaned
-Sidecar display is listed (one with no connected device), instead of spending a connect on
-it; `sidecar down` cannot remove it either, because nothing owns it.
+orphans disappear. Then `sidecar up` again. On a listed Sidecar display with no connected
+session `up` does not spend a connect: after the wake it tries one disconnect, and if the
+display survives that it stops with the lid-cycle message. `sidecar down` cannot remove an
+orphan either, because nothing owns it.
 
 **Why the obvious tools do not work.** An orphaned display is not owned by any process, so
 `kill`, `pkill`, `launchctl bootout` and `CGConfigureDisplayEnabled` have nothing to act
 on: they leave it exactly where it is. Only re-enumeration clears it.
 
 **How not to get there.** Never `SIGKILL` `vdisp`, and never restart it with
-`launchctl kickstart -k` (SIGKILL) or `launchctl bootout`: both were verified to leave the
-display behind. Use `sidecar restart-vdisp`, which sends `SIGTERM` and waits for the old
-display to go away and a new one to appear.
+`launchctl kickstart -k`, which is `SIGKILL`: they bypass the handler and leave the display
+behind. `kill -TERM`, `sidecar restart-vdisp` and `launchctl bootout` are safe, because the
+handler releases the display on the way out.
 
 ### `-455 SidecarErrorDisplayAWDLDegraded`, persistent
 
@@ -325,10 +393,13 @@ reconnecting.
 ```bash
 ./bin/sidecar status
 # lid:              closed
-# vdisp:            alive (pid 77186)
+# vdisp:            alive (pid 53586)
 # virtual display:  0x5644 up (1321x918, id=34)
-# sidecar:          connected (id=33, 1321x918, main)
-# mirror:           no
+# sidecar:          connected (id=35, 1321x918)
+# mirror:           sidecar 35 -> 34
+# uc defaults:      GlueIdleTimeout=3600 AutomaticallyReconnect=1
+# display awake:    vdisp, UniversalControl
+# keep-awake:       on (connected=1) (41s ago)
 
 ./bin/sidecar doctor
 # doctor: read-only consistency check
@@ -342,11 +413,33 @@ reconnecting.
 
 `log` is a zsh builtin: call `/usr/bin/log` explicitly.
 
+Besides the display state, `status` prints the factors the tools do not control:
+
+- `uc defaults:` — `GlueIdleTimeout` and `AutomaticallyReconnect` as read from
+  `com.apple.universalcontrol`, or `unset` when a key is absent;
+- `display awake:` — who currently holds `PreventUserIdleDisplaySleep`. `vdisp` (A1) and
+  Universal Control each hold their own, so both names can appear, and a live session with
+  no `vdisp` owner is what `doctor` fails on;
+- `keep-awake:` — the newest keep-awake line from `logs/vdisp.out.log` and
+  `logs/vdisp.log`, with its age, or `unknown` when there is no line or the newest is older
+  than ~120 s. The line is written on transitions, so a steady session can legitimately
+  read `unknown`.
+
+A session whose display is asleep is reported as
+`sidecar: suspended (display N asleep): waiting for display wake`.
+
+`dispid` prints one line per display: `id`, `vendor`, `model`, `serial`, `builtin`, `main`,
+`active`, `mirror_of`, `asleep` and `WxH`. A Sidecar display is **live** when
+`active=true` **or** `mirror_of≠0` (a mirrored display is not in the *active* list), and
+`asleep=true` is how a suspended session's display is recognised.
+
 `doctor` compares displays against processes, Sidecar against
 `SidecarDisplayManager.connectedDevices` (via `bin/connected`), checks that the virtual
 display exists, and — with the lid closed — that the virtual display is main and the
-Sidecar mirrors it, which is the arrangement `bin/arrange` applies. It exits 1
-and prints a `fix:` line for every problem.
+Sidecar mirrors it, which is the arrangement `bin/arrange` applies. It also reports the UC
+defaults, the assertion owners and the keep-awake line as `info`, and fails a live session
+that A1 is enabled for but `vdisp` does not keep awake. It exits 1 and prints a `fix:` line
+for every problem.
 
 `status` takes "connected" from the same probe, not from the display list, because a
 stale display can outlive the session. If the probe is unavailable (the private accessor
@@ -361,10 +454,11 @@ limitation as `info`, not as a failure.
 | the iPad is exclusive | a Sidecar session belongs to one host. This tool cannot take it from another Mac: release it **from the host that owns it** (Control Center, or that host's `sidecar down`) and retry |
 | the iPad must be awake and unlocked | even then `connect` can fail with `-203 SidecarErrorDeviceWiFiNotEnabled`; wake it and retry |
 | several virtual displays can coexist | each instance has its own `product`/`serial`. A second one without a process is a zombie: `doctor` reports it, the lid cycle removes it |
-| the virtual display dies with its process | but only if the process exits cleanly: see the rules at the top |
-| the mirrored desktop is the virtual display | with the lid closed the iPad shows the virtual screen: its size (`1321x918` in the template) is the desktop size, and the others sit to its right |
-| Universal Control stays unstable with the lid closed | measured: ~4 minutes before the pointer stops crossing (vs ~1 minute in the other arrangement), ~10 s to recover. Longer, not solved |
-| the mode is chosen by Sidecar | every `connect` negotiates its own mode, which is why `state/resolution` exists and `up` reapplies it — with a second connect only when the negotiated mode differs |
+| the virtual display dies with its process | if the process exits cleanly it releases the display first, so it dies with its process; a hard kill leaves it orphaned: see the rules at the top |
+| the mirrored desktop is the virtual display | the display the iPad shows in mirror is the **virtual** one: `1321x918` from the template is the desktop size the iPad renders, and the other displays sit to its right |
+| Universal Control stays unstable with the lid closed | the arrangement makes a session last longer; it does not prevent UC from dropping. No duration is quoted here because none is attributable — see `docs/uc-hardening/analysis.md`; recovery is ~10 s when UC reconnects by itself |
+| every role change of the iPad costs a UC reset | handing the iPad from one Mac to another (or back) tears the UC link down and rebuilds it: one reset per transition is OS behaviour the tool cannot avoid |
+| the mode is chosen by Sidecar | every `connect` negotiates its own mode, which is why `state/resolution` exists. `up` reapplies it only when it actually reconnects (the negotiated mode differs) or with `up --force`; a healthy session is left alone |
 | every connect is a new display | each `connect` produces a fresh Sidecar display id, and **Universal Control on other devices can accumulate duplicate tiles** for the displays it has seen. Fewer reconnects means fewer tiles; stale ones disappear with a logout or a restart of the device showing them |
 | no graphical session, no agent | `LimitLoadToSessionType Aqua` means the agent runs only inside a logged-in desktop session |
 | private APIs | `CGVirtualDisplay` and `SidecarCore` are not public; a macOS update can break either, and the probe in `bin/connected` exits 3 instead of crashing when an accessor disappears |
@@ -380,6 +474,8 @@ install.sh                             renders the plist, validates it, loads th
 bin/sidecar                            the command (bash, set -euo pipefail)
 bin/.gitignore                         ignores build outputs, keeps bin/sidecar
 daemon/local.sidecar.vdisp.plist.in    LaunchAgent template (@@TOOLS@@ → absolute path)
-logs/                                  sidecar.log, vdisp.log, arrange.log, mirror.log (git-ignored)
+logs/                                  sidecar.log, vdisp.log, vdisp.out.log, vdisp.err.log,
+                                       arrange.log, mirror.log, setmode.log, perceived.log
+                                       (git-ignored; perceived.log is the user's drop marker)
 state/                                 state/resolution (git-ignored)
 ```

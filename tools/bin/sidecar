@@ -439,10 +439,15 @@ variables:
             WAKE_SETTLE=10 DISCONNECT_TIMEOUT=15 RETRY_DELAY=5 TIMEOUT_RETRY_DELAY=10
             VDISP_TIMEOUT=10 DOWN_TIMEOUT=5 RESTART_TIMEOUT=30 (all overridable, for the
             offline tests)
+  VDISP_KEEP_AWAKE
+            read from the LaunchAgent: 1 = vdisp holds PreventUserIdleDisplaySleep for a
+            live session, 0 = it does not (the display can then sleep)
+  SIDECAR_BIN
+            test-only: directory the helpers are resolved from instead of this bin/
 
 files:
   log       $LOG
-  state     $RES_FILE (resolution reapplied when "up" reconnects)
+  state     $RES_FILE (resolution reapplied when "up" reconnects, or with "up --force")
 EOF
 }
 
@@ -483,13 +488,13 @@ usage: sidecar up [--force] [--help]
 7. verify the current mode against state/resolution; a mismatch is a warning, not a
    failure (run up again, or reconnect the iPad by hand)
 8. with the lid closed, arrange the displays so that the virtual display is main at
-   (0,0) and Sidecar mirrors it (bin/arrange). Measured on a closed lid: Universal
-   Control holds ~4 minutes this way, ~1 minute with Sidecar as main. The mirrored
+   (0,0) and Sidecar mirrors it (bin/arrange). The arrangement makes the session last
+   longer, it does not prevent Universal Control from dropping; no duration is quoted
+   because none is attributable (see docs/uc-hardening/analysis.md). The mirrored
    desktop is as big as the virtual display, which is why its size comes from the
    LaunchAgent environment (1321x918) rather than the 640x480 default
 9. mirror the Sidecar display onto the built-in one, when a built-in exists
-   (with the lid closed the mirror and the arrangement are skipped and the command
-   still succeeds)
+   (with the lid closed the mirror is skipped and the arrangement above applies)
 
 --force skips the healthy-session no-op and the wake/abort recovery (it still sends a
 bare caffeinate -u -t 2 before the forced disconnect) and performs the full reconnect
@@ -574,8 +579,9 @@ Sends SIGTERM to the vdisp process(es) found with pgrep and waits up to ${RESTAR
 for the old display ($VENDOR_VDISP) to leave the display list and a new one to appear;
 launchd KeepAlive starts it again with a fresh identity.
 
-SIGTERM lets the process release its display. SIGKILL, "launchctl kickstart -k" and
-"launchctl bootout" do not: they leave an orphan display behind.
+SIGTERM, SIGINT and "launchctl bootout" are safe: the process has a handler that releases
+its display before exiting. SIGKILL and "launchctl kickstart -k" (which sends SIGKILL)
+bypass that handler and leave an orphan display behind.
 
 exit 0 if the display was rebuilt, 1 if it is still the old one (open and close the lid).
 EOF
