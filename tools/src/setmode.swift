@@ -7,12 +7,8 @@ guard parts.count == 2, let W = Int(parts[0]), let H = Int(parts[1]) else {
     print("invalid format, expected e.g. 1165x809"); exit(1)
 }
 
-var n: UInt32 = 0
-CGGetActiveDisplayList(0, nil, &n)
-var ids = [CGDirectDisplayID](repeating: 0, count: Int(n)); CGGetActiveDisplayList(n, &ids, &n)
-// Sidecar display: vendor 0x6161706c
-guard let id = ids.prefix(Int(n)).first(where: { CGDisplayVendorNumber($0) == 0x6161706c }) else {
-    print("ERR: no active Sidecar display"); exit(1)
+guard let id = selectSidecar(onlineList()) else {
+    print("ERR: no online Sidecar display"); exit(1)
 }
 
 let opts = [kCGDisplayShowDuplicateLowResolutionModes as String: kCFBooleanTrue!] as CFDictionary

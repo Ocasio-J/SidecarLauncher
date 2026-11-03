@@ -2,6 +2,7 @@
 set -uo pipefail
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+TOOLS="$(cd -P "$HERE/.." && pwd)"
 SIDECAR="$HERE/../bin/sidecar"
 STUBS="$HERE/stubs"
 
@@ -387,6 +388,23 @@ run_sidecar up
 check "residual cleared: exits 0" expect_rc 0
 check "residual cleared: one caffeinate" expect_caffeinates 1
 check "residual cleared: one connect" expect_connects 1
+
+CASE "B1: one display-selection rule, staged as main.swift"
+check "B1: src/disprule.swift exists" test -f "$TOOLS/src/disprule.swift"
+check "B1: disprule declares onlineList" grep -q '^func onlineList' "$TOOLS/src/disprule.swift"
+check "B1: disprule declares selectSidecar" grep -q '^func selectSidecar' "$TOOLS/src/disprule.swift"
+check "B1: disprule declares selectVirtual" grep -q '^func selectVirtual' "$TOOLS/src/disprule.swift"
+check "B1: disprule is declarations only" bash -c '! grep -qEv "^([[:space:]]*$|[[:space:]]+|(import|let|func|\}))" "$1"' _ "$TOOLS/src/disprule.swift"
+check "B1: build.sh stages the helper as main.swift" grep -q 'cp "\$source" "\$stage/main.swift"' "$TOOLS/build.sh"
+check "B1: build.sh compiles disprule with the staged main" grep -q 'swiftc -O -o "\$tmp" "\$stage/main.swift" "\$shared"' "$TOOLS/build.sh"
+for shared_helper in mirror setmode dispmode arrange; do
+  check "B1: $shared_helper is built with the shared rule" grep -q "^SHARED_HELPERS=.*[[:space:]]$shared_helper\|^SHARED_HELPERS=\"[^\"]*$shared_helper" "$TOOLS/build.sh"
+done
+if [ -x "$TOOLS/bin/dispid" ]; then
+  OUT="$("$TOOLS/bin/dispid" 2>&1)"; RC=$?
+  check "B1: the real dispid helper still runs" expect_rc 0
+  check "B1: every dispid line ends with the resolution" bash -c 'printf "%s\n" "$1" | grep -qE "[0-9]+x[0-9]+$"' _ "$OUT"
+fi
 
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then

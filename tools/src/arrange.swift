@@ -1,45 +1,27 @@
 import CoreGraphics
 import Foundation
 
-let SIDECAR: UInt32 = 0x6161706c
-let VIRTUAL: UInt32 = 0x5644
-
-// Online, not active: a display that is already mirrored is not in the active list, and
-// the Sidecar arrives mirrored when it inherits the arrangement from a previous session.
-func online() -> [CGDirectDisplayID] {
-    var n: UInt32 = 0
-    CGGetOnlineDisplayList(0, nil, &n)
-    var ids = [CGDirectDisplayID](repeating: 0, count: Int(n))
-    CGGetOnlineDisplayList(n, &ids, &n)
-    return Array(ids.prefix(Int(n)))
-}
-
 func vendor(_ id: CGDirectDisplayID) -> String {
     "0x" + String(CGDisplayVendorNumber(id), radix: 16)
 }
 
 func label(_ id: CGDirectDisplayID) -> String {
     let v = CGDisplayVendorNumber(id)
-    if v == SIDECAR { return "sidecar" }
-    if v == VIRTUAL { return "virtual" }
+    if v == sidecarVendor { return "sidecar" }
+    if v == virtualVendor { return "virtual" }
     if CGDisplayIsBuiltin(id) != 0 { return "builtin" }
     return "display"
 }
 
-func pixels(_ id: CGDirectDisplayID) -> Int32 {
-    Int32(CGDisplayPixelsWide(id)) * Int32(CGDisplayPixelsHigh(id))
-}
+let ids = onlineList()
 
-let ids = online()
-
-guard let sidecar = ids.first(where: { CGDisplayVendorNumber($0) == SIDECAR }) else {
-    print("ERR: no online display with vendor 0x\(String(SIDECAR, radix: 16)) (Sidecar)")
+guard let sidecar = selectSidecar(ids) else {
+    print("ERR: no online display with vendor 0x\(String(sidecarVendor, radix: 16)) (Sidecar)")
     exit(2)
 }
 
-let virtuals = ids.filter { CGDisplayVendorNumber($0) == VIRTUAL }
-guard let vdisp = virtuals.max(by: { pixels($0) < pixels($1) }) else {
-    print("ERR: no online display with vendor 0x\(String(VIRTUAL, radix: 16)) (virtual display)")
+guard let vdisp = selectVirtual(ids) else {
+    print("ERR: no online display with vendor 0x\(String(virtualVendor, radix: 16)) (virtual display)")
     exit(2)
 }
 
