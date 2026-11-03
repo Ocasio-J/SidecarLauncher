@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'mirror %s\n' "$*" >>"$dir/calls.log"
+[ -n "${STUB_MIRROR_OUT:-}" ] && printf '%s\n' "$STUB_MIRROR_OUT"
+exit "${STUB_MIRROR_RC:-0}"

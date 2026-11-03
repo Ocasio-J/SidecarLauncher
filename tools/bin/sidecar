@@ -15,16 +15,25 @@ RETRY_DELAY=5
 DOWN_TIMEOUT=5
 RESTART_TIMEOUT=15
 
-SELF="${BASH_SOURCE[0]:-$0}"
-while [ -L "$SELF" ]; do
-  LINK_DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
-  SELF="$(readlink "$SELF")"
-  case "$SELF" in
-    /*) ;;
-    *) SELF="$LINK_DIR/$SELF" ;;
-  esac
-done
-BIN="$(cd -P "$(dirname "$SELF")" && pwd)"
+if [ -n "${SIDECAR_BIN:-}" ]; then
+  if [ -d "$SIDECAR_BIN" ]; then
+    BIN="$(cd -P "$SIDECAR_BIN" && pwd)"
+  else
+    printf 'ERROR: SIDECAR_BIN is set but not a usable directory: %s\n' "$SIDECAR_BIN" >&2
+    exit 1
+  fi
+else
+  SELF="${BASH_SOURCE[0]:-$0}"
+  while [ -L "$SELF" ]; do
+    LINK_DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+    SELF="$(readlink "$SELF")"
+    case "$SELF" in
+      /*) ;;
+      *) SELF="$LINK_DIR/$SELF" ;;
+    esac
+  done
+  BIN="$(cd -P "$(dirname "$SELF")" && pwd)"
+fi
 TOOLS="$(cd -P "$BIN/.." && pwd)"
 LOGS="$TOOLS/logs"
 LOG="$LOGS/sidecar.log"

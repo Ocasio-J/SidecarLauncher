@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'vdisp %s\n' "$*" >>"$dir/calls.log"
+exit "${STUB_VDISP_RC:-0}"

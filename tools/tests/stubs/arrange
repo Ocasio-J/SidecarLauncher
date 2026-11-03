@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'arrange %s\n' "$*" >>"$dir/calls.log"
+[ -n "${STUB_ARRANGE_OUT:-}" ] && printf '%s\n' "$STUB_ARRANGE_OUT"
+exit "${STUB_ARRANGE_RC:-0}"

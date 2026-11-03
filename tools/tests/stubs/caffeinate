@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+printf 'caffeinate %s\n' "$*" >>"$dir/calls.log"
+if [ "${STUB_CAFFEINATE_SLEEP:-0}" != "0" ]; then
+  sleep "$STUB_CAFFEINATE_SLEEP"
+fi
+if [ "${STUB_WAKE_RECONNECTS:-0}" = "1" ]; then
+  : >"$dir/woken"
+fi
+if [ "${STUB_WAKE_SHOWS_DISPLAY:-0}" = "1" ]; then
+  : >"$dir/display_present"
+fi
+exit "${STUB_CAFFEINATE_RC:-0}"

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+log="$dir/calls.log"
+cmd="${1:-}"
+name="${2:-}"
+printf '%s %s\n' "$cmd" "$name" >>"$log"
+
+seq_rc() {
+  local seq="$1" n="$2" def="$3" value=""
+  if [ -n "$seq" ]; then
+    value="$(printf '%s\n' $seq | sed -n "${n}p")"
+  fi
+  printf '%s' "${value:-$def}"
+}
+
+connect_count() { grep -c '^connect ' "$log" 2>/dev/null || true; }
+disconnect_count() { grep -c '^disconnect ' "$log" 2>/dev/null || true; }
+
+case "$cmd" in
+  connect)
+    n="$(connect_count)"
+    rc="$(seq_rc "${STUB_CONNECT_RC_SEQ:-}" "$n" "${STUB_CONNECT_RC:-0}")"
+    [ -n "${STUB_CONNECT_OUT:-}" ] && printf '%s\n' "$STUB_CONNECT_OUT"
+    if [ "${STUB_CONNECT_SHOWS_DISPLAY_EARLY:-0}" = "1" ]; then
+      : >"$dir/display_present"
+    fi
+    if [ "${STUB_CONNECT_SLEEP:-0}" != "0" ]; then
+      sleep "$STUB_CONNECT_SLEEP"
+    fi
+    if [ "$rc" -eq 0 ]; then
+      if [ "${STUB_CONNECT_SHOWS_DISPLAY_EARLY:-0}" != "1" ]; then
+        if [ "${STUB_CONNECT_LEAVES_DISPLAY:-1}" = "1" ]; then
+          : >"$dir/display_present"
+        fi
+      fi
+    fi
+    exit "$rc"
+    ;;
+  disconnect)
+    rc="$(seq_rc "${STUB_DISCONNECT_RC_SEQ:-}" "$(disconnect_count)" "${STUB_DISCONNECT_RC:-0}")"
+    [ -n "${STUB_DISCONNECT_OUT:-}" ] && printf '%s\n' "$STUB_DISCONNECT_OUT"
+    if [ "${STUB_DISCONNECT_SLEEP:-0}" != "0" ]; then
+      sleep "$STUB_DISCONNECT_SLEEP"
+    fi
+    if [ "$rc" -eq 0 ]; then
+      if [ "${STUB_DISCONNECT_LEAVES_DISPLAY:-1}" = "0" ]; then
+        rm -f "$dir/display_present"
+      fi
+    fi
+    exit "$rc"
+    ;;
+  devices)
+    [ -n "${STUB_DEVICES_OUT:-}" ] && printf '%s\n' "$STUB_DEVICES_OUT"
+    exit "${STUB_DEVICES_RC:-0}"
+    ;;
+  *)
+    printf 'stub SidecarLauncher: unknown command %s\n' "$cmd" >&2
+    exit 1
+    ;;
+esac

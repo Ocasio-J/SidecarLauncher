@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -u
+
+dir="${STUB_DIR:?STUB_DIR is not set}"
+counter="$dir/count.connected"
+n=0
+if [ -f "$counter" ]; then n="$(cat "$counter")"; fi
+n=$((n + 1))
+printf '%s\n' "$n" >"$counter"
+printf 'connected %s\n' "$n" >>"$dir/calls.log"
+
+seq_rc() {
+  local seq="$1" n="$2" def="$3" value=""
+  if [ -n "$seq" ]; then
+    value="$(printf '%s\n' $seq | sed -n "${n}p")"
+  fi
+  printf '%s' "${value:-$def}"
+}
+
+rc="$(seq_rc "${STUB_CONNECTED_RC_SEQ:-}" "$n" "${STUB_CONNECTED_RC:-0}")"
+if [ -f "$dir/woken" ] && [ "${STUB_WAKE_RECONNECTS:-0}" = "1" ]; then
+  rc=0
+fi
+
+if [ "$rc" -eq 0 ]; then
+  printf 'connected=1\n'
+  printf 'device=%s\n' "${STUB_DEVICE_NAME:-iPad}"
+elif [ "$rc" -eq 1 ]; then
+  printf 'connected=0\n'
+else
+  printf 'ERR: stub probe unavailable\n' >&2
+fi
+exit "$rc"
