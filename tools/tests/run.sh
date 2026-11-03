@@ -406,6 +406,35 @@ if [ -x "$TOOLS/bin/dispid" ]; then
   check "B1: every dispid line ends with the resolution" bash -c 'printf "%s\n" "$1" | grep -qE "[0-9]+x[0-9]+$"' _ "$OUT"
 fi
 
+CASE "B2: mirror reports its failure instead of passing silently"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_MIRROR_OF=17
+STUB_BUILTIN=1
+STUB_MIRROR_RC=1
+STUB_MIRROR_OUT="ERR: mirroring the Sidecar onto the built-in display failed (mirror=1001 commit=0)"
+run_sidecar up
+check "mirror failure: up still exits 0 (the session stays up)" expect_rc 0
+check "mirror failure: one mirror attempt" expect_call "mirror"
+check "mirror failure: warns about the mirror" expect_out "mirror failed"
+check "mirror failure: no arrange when a built-in exists" expect_no_call "arrange"
+
+CASE "B2: an already mirrored Sidecar is not an error"
+STUB_CONNECTED_RC=0
+STUB_SIDECAR_ALWAYS=1
+STUB_SIDECAR_MIRROR_OF=1
+STUB_BUILTIN=1
+STUB_MIRROR_OUT="already mirrored: sidecar 22 -> builtin 1"
+run_sidecar up
+check "already mirrored: exits 0" expect_rc 0
+check "already mirrored: mirror applied" expect_out "mirror applied onto the built-in display"
+
+CASE "B2: mirror keeps the shared rule and the already-mirrored short-circuit"
+check "B2: no headless vendor in the sources" bash -c '! grep -rq "0x756e6b6e" "$1"' _ "$TOOLS/src"
+check "B2: mirror prints already mirrored" grep -q 'already mirrored: sidecar' "$TOOLS/src/mirror.swift"
+check "B2: mirror exits 1 on a failed commit" grep -q 'r != .success || done != .success' "$TOOLS/src/mirror.swift"
+check "B2: mirror uses selectSidecar" grep -q 'selectSidecar(' "$TOOLS/src/mirror.swift"
+
 printf '\n%d cases, %d passed, %d failed\n' "$CASES" "$PASS" "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
   exit 1
