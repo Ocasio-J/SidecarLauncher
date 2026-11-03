@@ -845,8 +845,9 @@ a5_recover() {
     fi
     fail "wake and disconnect did not release the Sidecar display (id $(field "$anyl" id)).
 \`sidecar down\` cannot remove it: open and close the lid once to force the WindowServer
-to re-enumerate displays. Never SIGKILL vdisp, kickstart -k or bootout: they leave the
-display behind."
+to re-enumerate displays. SIGTERM and \`launchctl bootout\` are safe: vdisp releases its
+display before exiting. Never SIGKILL vdisp or \`launchctl kickstart -k\`: they skip the
+handler and leave the display behind."
     return 2
   fi
 
@@ -1174,7 +1175,7 @@ cmd_doctor() {
       "start the agent: ./install.sh (or launchctl bootstrap gui/$(id -u)); if displays remain with no process, open and close the lid"
   elif [ "$vcount" -gt "$pcount" ]; then
     check_bad "$vcount virtual display(s) for $pcount vdisp process(es): zombie displays" \
-      "open and close the lid once to re-enumerate the displays; sidecar restart-vdisp (SIGTERM) only helps when the surplus display still belongs to a live process. kill -9, launchctl kickstart -k and bootout all leave the display behind"
+      "open and close the lid once to re-enumerate the displays; sidecar restart-vdisp (SIGTERM) only helps when the surplus display still belongs to a live process. SIGTERM and launchctl bootout are safe (vdisp releases its display before exiting); kill -9 and launchctl kickstart -k skip that handler and leave the display behind"
   elif [ "$vcount" -lt "$pcount" ]; then
     check_bad "$pcount vdisp process(es) but only $vcount virtual display(s)" \
       "run sidecar restart-vdisp (SIGTERM, never kill -9), or open and close the lid"

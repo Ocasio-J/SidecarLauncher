@@ -381,7 +381,7 @@ check "surviving display: no connect (-501 avoided)" expect_connects 0
 check "surviving display: one disconnect attempt" expect_disconnects 1
 check "surviving display: names the abort" expect_out "wake and disconnect did not release the Sidecar display"
 check "surviving display: points at sidecar down" expect_out "sidecar down"
-check "surviving display: never SIGKILL/kickstart/bootout" expect_out "Never SIGKILL vdisp, kickstart -k or bootout"
+check "surviving display: SIGTERM/bootout are safe, SIGKILL is not" expect_out 'SIGTERM and `launchctl bootout` are safe'
 check "surviving display: never reported healthy" expect_no_out "session healthy"
 
 CASE "A5: --force skips the wake recovery but still caffeinates once"
