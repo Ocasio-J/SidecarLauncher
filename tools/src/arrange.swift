@@ -4,11 +4,13 @@ import Foundation
 let SIDECAR: UInt32 = 0x6161706c
 let VIRTUAL: UInt32 = 0x5644
 
-func active() -> [CGDirectDisplayID] {
+// Online, not active: a display that is already mirrored is not in the active list, and
+// the Sidecar arrives mirrored when it inherits the arrangement from a previous session.
+func online() -> [CGDirectDisplayID] {
     var n: UInt32 = 0
-    CGGetActiveDisplayList(0, nil, &n)
+    CGGetOnlineDisplayList(0, nil, &n)
     var ids = [CGDirectDisplayID](repeating: 0, count: Int(n))
-    CGGetActiveDisplayList(n, &ids, &n)
+    CGGetOnlineDisplayList(n, &ids, &n)
     return Array(ids.prefix(Int(n)))
 }
 
@@ -28,20 +30,26 @@ func pixels(_ id: CGDirectDisplayID) -> Int32 {
     Int32(CGDisplayPixelsWide(id)) * Int32(CGDisplayPixelsHigh(id))
 }
 
-let ids = active()
+let ids = online()
 
 guard let sidecar = ids.first(where: { CGDisplayVendorNumber($0) == SIDECAR }) else {
-    print("ERR: no active display with vendor 0x\(String(SIDECAR, radix: 16)) (Sidecar)")
+    print("ERR: no online display with vendor 0x\(String(SIDECAR, radix: 16)) (Sidecar)")
     exit(2)
 }
 
 let virtuals = ids.filter { CGDisplayVendorNumber($0) == VIRTUAL }
 guard let vdisp = virtuals.max(by: { pixels($0) < pixels($1) }) else {
-    print("ERR: no active display with vendor 0x\(String(VIRTUAL, radix: 16)) (virtual display)")
+    print("ERR: no online display with vendor 0x\(String(VIRTUAL, radix: 16)) (virtual display)")
     exit(2)
 }
 
 print("sidecar \(sidecar) (vendor \(vendor(sidecar))), virtual \(vdisp) (vendor \(vendor(vdisp)))")
+print("  virtual main=\(CGDisplayIsMain(vdisp) != 0), sidecar mirrors=\(CGDisplayMirrorsDisplay(sidecar))")
+
+if CGDisplayIsMain(vdisp) != 0 && CGDisplayMirrorsDisplay(sidecar) == vdisp {
+    print("already arranged: virtual display \(vdisp) is main and Sidecar \(sidecar) mirrors it")
+    exit(0)
+}
 
 // A mirrored display cannot be configured, so clear any mirror on the Sidecar first.
 print("phase 1: clear the mirror on the Sidecar")

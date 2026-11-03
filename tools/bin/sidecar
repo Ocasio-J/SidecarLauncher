@@ -320,8 +320,8 @@ Read-only consistency check. Compares:
     processes means zombie displays);
   - the Sidecar display ($VENDOR_SIDECAR) against SidecarDisplayManager.connectedDevices;
   - vdisp being alive at all (the LaunchAgent's job);
-  - with the lid closed, whether the Sidecar display is the main one (it should be, or
-    the iPad shows an empty extended desktop);
+  - with the lid closed, whether the virtual display is main and the Sidecar mirrors it
+    (the arrangement bin/arrange applies);
   - the lid state.
 
 Every problem comes with the action that fixes it. Changes nothing.
@@ -680,7 +680,7 @@ check_bad() {
 
 cmd_doctor() {
   local problems=0 lid pids pcount vcount scount probe_out probe_rc probe_state cdev devices sline
-  local dev_out dev_rc
+  local dev_out dev_rc vline vmain mstate
 
   need_bin dispid || return 1
 
@@ -776,17 +776,19 @@ cmd_doctor() {
   fi
 
   if [ "$lid" = "closed" ] && [ "$scount" -gt 0 ]; then
-    sline="$(display_line "vendor=$VENDOR_SIDECAR|model=$MODEL_SIDECAR")"
-    if is_main "$sline"; then
-      check_ok "lid closed and the Sidecar display is the main one"
+    vline="$(display_line "vendor=$VENDOR_VDISP")"
+    if is_main "$vline"; then vmain=yes; else vmain=no; fi
+    mstate="$(mirror_state)"
+    if [ "$vmain" = "yes" ] && [ "$mstate" = "yes" ]; then
+      check_ok "lid closed: the virtual display is main and Sidecar mirrors it"
     else
-      check_bad "lid closed but the Sidecar display is not the main one: the desktop is on the virtual display" \
-        "run sidecar up, or bin/arrange, to put Sidecar at (0,0); the virtual display is created first, so it becomes main by default"
+      check_bad "lid closed but the desktop is not arranged as intended (virtual main=$vmain, sidecar mirror=$mstate)" \
+        "run sidecar up, or bin/arrange, to put the virtual display at (0,0) and mirror Sidecar onto it"
     fi
   fi
 
   case "$lid" in
-    closed) check_info "lid closed: mirror not applicable, the virtual display is what keeps Sidecar alive" ;;
+    closed) check_info "lid closed: no built-in display, so up arranges the desktop instead of mirroring onto it" ;;
     open) check_info "lid open: a built-in display is available, up can mirror onto it" ;;
     *) check_info "lid state unknown" ;;
   esac

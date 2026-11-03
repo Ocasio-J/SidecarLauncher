@@ -77,7 +77,14 @@ A mirrored display cannot be configured, so `arrange` works in phases, each with
 3. mirror the Sidecar onto the virtual display;
 4. verify: the virtual display is main, the Sidecar is in a mirror set.
 
-Re-running it is safe. `up` calls it only when the lid is closed (no built-in display),
+Re-running it is safe: if the state is already the desired one it prints
+`already arranged: virtual display N is main and Sidecar M mirrors it` and exits 0 without
+touching the configuration. It enumerates the **online** display list, like `dispid`: a
+mirrored display is not in the *active* list, and the Sidecar arrives mirrored when it
+inherits the arrangement from the previous session — enumerating active displays would
+make it invisible and the run would abort while the geometry is already correct.
+
+`up` calls it only when the lid is closed (no built-in display),
 after the final connect and before `bin/mirror`. With a built-in display `arrange` is not
 called: the physical panel stays main and `bin/mirror` mirrors the Sidecar onto it.
 
@@ -337,7 +344,8 @@ reconnecting.
 
 `doctor` compares displays against processes, Sidecar against
 `SidecarDisplayManager.connectedDevices` (via `bin/connected`), checks that the virtual
-display exists, and — with the lid closed — that Sidecar is the main display. It exits 1
+display exists, and — with the lid closed — that the virtual display is main and the
+Sidecar mirrors it, which is the arrangement `bin/arrange` applies. It exits 1
 and prints a `fix:` line for every problem.
 
 `status` takes "connected" from the same probe, not from the display list, because a
